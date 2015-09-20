@@ -1,0 +1,13 @@
+{application, gordon,
+ [
+  {description, ""},
+  {vsn, "0.5"},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib,
+		  hex,
+		  lager
+                 ]},
+  {env, []}
+ ]}.
