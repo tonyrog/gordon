@@ -276,6 +276,22 @@ sdo_rx(CobID,Bin,State) ->
     end,
     {noreply,State}.
 
+%% generate a request to read node values
+send_sdo_rx(CobId, Index, SubInd) ->
+    Bin = ?sdo_ccs_initiate_upload_request(0,Index,SubInd,0),
+    CobId1 = case ?is_cobid_extended(CobId) of
+		 true ->
+		     NodeId = ?XNODE_ID(CobId),
+		     ?XCOB_ID(?SDO_RX,NodeId);
+		 false ->
+		     NodeId = ?NODE_ID(CobId),
+		     ?COB_ID(?SDO_RX,NodeId)
+	     end,
+    io:format("XCobId1 = ~8.16.0B\n", [CobId1]),
+    CanId = ?COBID_TO_CANID(CobId1),
+    Frame = #can_frame { id=CanId,len=8,data=Bin},
+    can:send(Frame).
+
 %% reply from node
 sdo_tx(CobID,Bin,State) ->  
     case Bin of
@@ -289,14 +305,14 @@ sdo_tx(CobID,Bin,State) ->
 	    Value = sdo_value(S,N,Data),
 	    io:format("sdo_tx: CobID=~s, GET RESP index=~w, si=~w, value=~w\n", 
 		      [integer_to_list(CobID,16),Index,SubInd,Value]),
-	    set_value_by_cobid(CobID,Index,SubInd,Value,State);
+	    State1 = set_value_by_cobid(CobID,Index,SubInd,Value,State),
+	    {noreply,State1};
 	_ ->
 	    io:format("sdo_tx: CobID=~s, only  expedited mode supported\n",
 		      [integer_to_list(CobID,16)]),
 	    {noreply,State}
     end.
 
-    
 sdo_value(0,_N,_Bin) -> <<>>;
 sdo_value(1,0,<<Value:32/little>>) -> Value;
 sdo_value(1,1,<<Value:24/little,_:8>>) -> Value;
@@ -308,9 +324,17 @@ node_booted(_CobID, Serial, State) ->
     Nodes = set_status_by_serial(Serial, boot, State#state.nodes),
     {noreply, State#state { nodes=Nodes }}.
 
-node_started(_CobID, Serial, State) ->
-    io:format("Node ~s started\n", [integer_to_list(Serial,16)]),
+node_started(CobId, Serial, State) ->
+    io:format("Node ~6.16.0B started\n", [Serial]),
     Nodes = set_status_by_serial(Serial, up, State#state.nodes),
+    spawn(
+      fun() ->
+	      XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
+	      io:format("XCobId = ~8.16.0B\n", [XCobId]),
+	      send_sdo_rx(XCobId, ?INDEX_ID, 0),
+	      send_sdo_rx(XCobId, ?IX_IDENTITY_OBJECT, ?SI_IDENTITY_PRODUCT)
+	      %% ...
+      end),
     {noreply, State#state { nodes=Nodes }}.
 
 node_message(_CobID, Index, Si, Value, State) ->
@@ -333,28 +357,33 @@ set_status_by_serial(Serial, Status, Ns) ->
 set_value_by_cobid(CobId,Index,SubInd,Value,State) ->
     case Index of
 	?INDEX_ID ->
-	    set_value_by_cobid(CobId,id,SubInd,Value,State);
+	    set_by_cobid(CobId,id,integer_to_list(Value),State);
 	?IX_IDENTITY_OBJECT when SubInd =:= ?SI_IDENTITY_PRODUCT ->
-	    case (Value bsr 16) band 16#00ff of
-		1 -> 
-		    set_by_cobid(CobId,product,powerZone,State);
+	    Product = (Value bsr 16) band 16#ff,
+	    _Variant = (Value bsr 24) band 16#ff,
+	    Vsn = integer_to_list((Value bsr 8) band 16#ff) ++ "." ++
+		integer_to_list(Value band 16#ff),
+	    State1 = set_by_cobid(CobId,vsn,Vsn,State),
+	    case Product of
+		1 ->
+		    set_by_cobid(CobId,product,powerZone,State1);
 		2 -> 
-		    set_by_cobid(CobId,product,controlZone,State);
+		    set_by_cobid(CobId,product,controlZone,State1);
 		4 ->
-		    set_by_cobid(CobId,product,ioZone,State);
+		    set_by_cobid(CobId,product,ioZone,State1);
 		9 ->
-		    set_by_cobid(CobId,product,bridgeZone,State);
+		    set_by_cobid(CobId,product,bridgeZone,State1);
 		_ ->
-		    {noreply, State}
+		    State1
 	    end;
 	_ ->
-	    {noreply, State}
+	    State
     end.
 
 set_by_cobid(CobID,Key,Value,State) ->
     case ?is_cobid_extended(CobID) of
 	true ->
-	    Serial = CobID band 16#1ffffff,
+	    Serial = ?XNODE_ID(CobID),
 	    Ns = State#state.nodes,
 	    case take_node_by_serial(Serial, Ns) of
 		false ->
@@ -362,14 +391,14 @@ set_by_cobid(CobID,Key,Value,State) ->
 		    set_text(serial,Pos,serial_to_text(Serial)),
 		    set_text(Key,Pos,Value),
 		    N = #{ pos=>Pos, serial=>Serial, Key=>Value },
-		    {noreply, State#state { nodes=[N|Ns]}};
+		    State#state { nodes=[N|Ns]};
 		{value,N=#{ pos := Pos},Ns1} ->
 		    set_text(Key,Pos,Value),
 		    N1 = N#{ Key => Value },
-		    {noreply, State#state { nodes=[N1|Ns1]}}
+		    State#state { nodes=[N1|Ns1]}
 	    end;
 	false ->
-	    ID = CobID band 16#7f,
+	    ID = ?NODE_ID(CobID),
 	    Ns = State#state.nodes,
 	    case take_node_by_id(ID, Ns) of
 		false ->
@@ -377,16 +406,17 @@ set_by_cobid(CobID,Key,Value,State) ->
 		    set_text(id,Pos,id_to_text(ID)),
 		    set_text(Key,Pos,Value),
 		    N = #{ pos=>Pos, id=>ID, Key=>Value },
-		    {noreply, State#state { nodes=[N|Ns]}};
+		    State#state { nodes=[N|Ns]};
 		{value,N=#{ pos := Pos},Ns1} ->
 		    set_text(Key,Pos,Value),
 		    N1 = N#{ Key => Value },
-		    {noreply, State#state { nodes=[N1|Ns1]}}
+		    State#state { nodes=[N1|Ns1]}
 	    end
     end.
 	    
 set_text(Key,Pos,Value) ->
     ID = atom_to_list(Key) ++ "_" ++ integer_to_list(Pos),
+    io:format("set_text: id=~s, value=~s\n", [ID,Value]),
     hex_epx:output([{id,ID}],[{text,Value}]).
 
 serial_to_text(Serial) ->
