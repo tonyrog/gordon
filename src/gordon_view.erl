@@ -178,69 +178,81 @@ code_change(_OldVsn, State, _Extra) ->
 %% +------+---+----------+---+--------+
 
 node_table(W,_H) ->
-    header(0,W),
-    [row(I,W) || I <- lists:seq(1,16)].
+    text("dummy", 0, 0, 10, 10, [{text,""}]),
+    {ok,[{font,Font}]} = hex_epx:get_event("dummy", [font]),
+    epx_gc:set_font(Font),
+    {TxW0,TxH} = epx_font:dimension(epx_gc:current(), "Wy"),
+    TxW = TxW0 div 2,
+    header(0,TxW,TxH,W),
+    [row(I,TxW,TxH,W) || I <- lists:seq(1,16)].
 
-header(I,_W) ->
-    Y = I*15+3,
-    H = 15,
+header(I,TxW,TxH,_W) ->
+    Y = I*TxH+3,
+    H = TxH,
     Opts = [{font_color,white}, {color,black}, {fill,solid}],
     X0 = 3,
-
-    text_cell("serial_header", X0, Y, 60, H,
+    W0 = 6*TxW,
+    text_cell("serial_header", X0, Y, W0, H,
 	      [{text,"Serial"},{halign,right}|Opts]),
-    X1 = X0 + 61,
-    text_cell("id_header", X1, Y, 30, H, 
+    X1 = X0 + W0 + 1,
+    W1 = 3*TxW,
+    text_cell("id_header", X1, Y, W1, H, 
 	      [{text,"ID"},{halign,right}|Opts]),
-
-    X2 = X1 + 31,
-    text_cell("product_header", X2, Y, 100, H,
+    X2 = X1 + W1 + 1,
+    W2 = 10*TxW,
+    text_cell("product_header", X2, Y, W2, H,
 	      [{text,"Product"},{halign,center}|Opts]),
-
-    X3 = X2 + 101,
-    text_cell("vsn_header", X3, Y, 30, H,
+    X3 = X2 + W2 + 1,
+    W3 = 3*TxW,
+    text_cell("vsn_header", X3, Y, W3, H,
 	      [{text,"Vsn"},{halign,center}|Opts]),
-
-    X4 = X3 + 31,
-    text_cell("status_header", X4, Y, 50, H,
+    X4 = X3 + W3 + 1,
+    W4 = 5*TxW,
+    text_cell("status_header", X4, Y, W4, H,
 	      [{text,"Status"},{halign,center}|Opts]).
 
 
-row(I,_W) ->
+row(I,TxW,TxH,_W) ->
     II = integer_to_list(I),
-    Y = I*15+3,
-    H = 15,
+    Y = I*TxH+3,
+    H = TxH,
 
     X0 = 3,
-    text_cell("serial_"++II, X0, Y, 60, H,
+    W0 = 6*TxW,
+    text_cell("serial_"++II, X0, Y, W0, H,
 	      [{text,""},{halign,right}]),
-
-    X1 = X0 + 61,
-    text_cell("id_"++II, X1, Y, 30, H,
+    X1 = X0 + W0 + 1,
+    W1 = 3*TxW,
+    text_cell("id_"++II, X1, Y, W1, H,
 	      [{text,""},{halign,right}]),
-
-    X2 = X1 + 31,
-    text_cell("product_"++II, X2, Y, 100, H,
+    X2 = X1 + W1 + 1,
+    W2 = 10*TxW,
+    text_cell("product_"++II, X2, Y, W2, H,
 	      [{text,""},{halign,center}]),
-
-    X3 = X2 + 101,
-    text_cell("vsn_"++II, X3, Y, 30, H,
+    X3 = X2 + W2 + 1,
+    W3 = 3*TxW,
+    text_cell("vsn_"++II, X3, Y, W3, H,
 	      [{text,""},{halign,center}]),
-    
-    X4 = X3 + 31,
-    text_cell("status_"++II, X4, Y, 50, H,
+    X4 = X3 + W3 + 1,
+    W4 = 5*TxW,
+    text_cell("status_"++II, X4, Y, W4, H,
 	      [{text,""},{halign,center}]).
 
 text_cell(ID, X, Y, W, H, Opts) ->
+    text(ID, X, Y, W, H, Opts),
+    border(ID, X, Y, W, H, Opts).
+
+text(ID,X,Y,W,H,Opts) ->
     hex_epx:init_event(out,
 		       [{id,ID},{type,text},
-			{font,[{name,"Arial"},{slant,roman},{size,10}]},
+			{font,[{name,"Arial"},{slant,roman},{size,12}]},
 			{x,X},{y,Y},
-			{width,W},{height,H},{valign,center}|Opts]),
+			{width,W},{height,H},{valign,center}|Opts]).
+
+border(ID,X,Y,W,H,Opts) ->
     hex_epx:init_event(out,
 		       [{id,ID++".border"},{type,rectangle},
 			{color,black},{x,X},{y,Y},{width,W+1},{height,H+1}]).
-
 
 pdo1_tx(CobID,Data,State) ->
     case Data of
@@ -287,7 +299,6 @@ send_sdo_rx(CobId, Index, SubInd) ->
 		     NodeId = ?NODE_ID(CobId),
 		     ?COB_ID(?SDO_RX,NodeId)
 	     end,
-    io:format("XCobId1 = ~8.16.0B\n", [CobId1]),
     CanId = ?COBID_TO_CANID(CobId1),
     Frame = #can_frame { id=CanId,len=8,data=Bin},
     can:send(Frame).
