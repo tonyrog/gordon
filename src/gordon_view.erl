@@ -249,7 +249,7 @@ text(ID,X,Y,W,H,Opts) ->
 			{x,X},{y,Y},
 			{width,W},{height,H},{valign,center}|Opts]).
 
-border(ID,X,Y,W,H,Opts) ->
+border(ID,X,Y,W,H,_Opts) ->
     hex_epx:init_event(out,
 		       [{id,ID++".border"},{type,rectangle},
 			{color,black},{x,X},{y,Y},{width,W+1},{height,H+1}]).
@@ -335,7 +335,7 @@ node_booted(_CobID, Serial, State) ->
     Nodes = set_status_by_serial(Serial, boot, State#state.nodes),
     {noreply, State#state { nodes=Nodes }}.
 
-node_started(CobId, Serial, State) ->
+node_started(_CobId, Serial, State) ->
     io:format("Node ~6.16.0B started\n", [Serial]),
     Nodes = set_status_by_serial(Serial, up, State#state.nodes),
     spawn(
@@ -371,7 +371,7 @@ set_value_by_cobid(CobId,Index,SubInd,Value,State) ->
 	    set_by_cobid(CobId,id,integer_to_list(Value),State);
 	?IX_IDENTITY_OBJECT when SubInd =:= ?SI_IDENTITY_PRODUCT ->
 	    Product = (Value bsr 16) band 16#ff,
-	    _Variant = (Value bsr 24) band 16#ff,
+	    %% _Variant = (Value bsr 24) band 16#ff,
 	    Vsn = integer_to_list((Value bsr 8) band 16#ff) ++ "." ++
 		integer_to_list(Value band 16#ff),
 	    State1 = set_by_cobid(CobId,vsn,Vsn,State),
