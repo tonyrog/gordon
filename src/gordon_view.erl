@@ -32,6 +32,9 @@
 	{
 	  uart,      %% serial flash uart device
 	  timer,     %% CANbus ping timer
+	  selected,        %% Selected node
+	  selected_eff=0,  %% Selected node
+	  selected_sff=0,  %% Selected node
 	  nodes = [] %% list of node maps
 	}).
 
@@ -73,9 +76,19 @@ start() ->
 %% @end
 %%--------------------------------------------------------------------
 init(Options) ->
+    SELF = self(),
+    hex_epx:output([{id,"screen"}],[{static,false}]), %% allow close
+    hex_epx:add_event([{id,"screen"}], screen,
+		      fun(Signal,Env) ->
+			      SELF ! {event,Signal,Env}
+		      end),
+
     Width  = proplists:get_value(width, Options, 640),
     Height = proplists:get_value(height, Options, 480),
     node_table(Width, Height),
+
+    control_demo(Width div 2, 10, Width, Height),
+
     can_router:attach(),
     {ok, #state{}}.
 
@@ -137,8 +150,43 @@ handle_info(Frame, State) when is_record(Frame,can_frame) ->
 	    io:format("Frame = ~p\n", [Frame]),
 	    {noreply, State}
     end;
+handle_info({event, screen, [{closed,true}]}, State) ->
+    %% fixme: try to terminate gracefully
+    {stop, normal, State};
+
+handle_info({row_select,ID,[{press,1},{row,R}]},State) ->
+    case find_node_by_pos(R, State#state.nodes) of
+	false ->
+	    io:format("deselect old\n"),
+	    {noreply, deselect_row(State#state.selected,State)};
+	{value,Node} ->
+	    EFF = case maps:get(serial,Node,0) of
+		      0 -> 0;
+		      N -> ?XCOB_ID(?PDO1_TX,N)
+		  end,
+	    SFF = case maps:get(id,Node,0) of
+		      0 -> 0;
+		      M -> ?COB_ID(?PDO1_TX,M)
+		  end,
+	    State1 = deselect_row(State#state.selected,State),
+	    State2 = State#state { selected = Node, 
+				   selected_eff = EFF,
+				   selected_sff = SFF },
+	    {noreply, State2}
+    end;
+handle_info({row_select,ID,[{press,0},{row,R}]},State) ->
+    %% ignore mouse release
+    {noreply, State};
+
+
+handle_info({switch,Label,[{value,Value}]},State) ->
+    case Value of
+	0 -> hex_epx:output([{id,Label}],[{color,lightgray},{text,"OFF"}]);
+	1 -> hex_epx:output([{id,Label}],[{color,green},{text,"ON"}])
+    end,
+    {noreply, State};    
 handle_info(_Info, State) ->
-    io:format("got info ~p\n", [_Info]),
+    io:format("gordon_view: got info ~p\n", [_Info]),
     {noreply, State}.
 
 %%--------------------------------------------------------------------
@@ -170,6 +218,11 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
+deselect_row(undefined, State) ->
+    State;
+deselect_row(Row, State) ->
+    State#state { selected=undefined }.
+
 %% Node table
 %% +------+---+----------+---+--------+
 %% |Serial| ID|Product   |Vsn| Status |
@@ -183,14 +236,41 @@ node_table(W,_H) ->
     epx_gc:set_font(Font),
     {TxW0,TxH} = epx_font:dimension(epx_gc:current(), "Wy"),
     TxW = TxW0 div 2,
-    header(0,TxW,TxH,W),
-    [row(I,TxW,TxH,W) || I <- lists:seq(1,16)].
+    XOffs = 8,
+    YOffs = 8,
+    NRows = 16,
+    TabX = header(0,XOffs,YOffs,TxW,TxH,W),
+    TabWidth = TabX - XOffs,
+    [row(I,XOffs,YOffs,TxW,TxH,W) || I <- lists:seq(1,NRows)],
+    %% create a invisible overlay for row selection
+    selection_layer(XOffs, YOffs, NRows, TxH, TabWidth).
 
-header(I,TxW,TxH,_W) ->
-    Y = I*TxH+3,
+selection_layer(XOffs,YOffs,NRows,RowHeight,TableWidth) ->
+    SELF = self(),
+    ID = "row_select",
+    hex_epx:init_event(out,
+		       [{id,ID},{type,rectangle},
+			%% {fill,none},{color,red},
+			{x,XOffs},{y,YOffs+RowHeight},
+			{width,TableWidth},{height,NRows*RowHeight}]),
+    hex_epx:add_event([{id,ID}],select,
+		      fun(_Signal,[{press,1},{x,_},{y,Y}|_]) ->
+			      Row = (Y div RowHeight)+1,
+			      SELF ! {row_select,ID,[{press,1},{row,Row}]};
+			 (_Signal,[{press,0},{x,_},{y,Y}|_]) ->
+			      Row = (Y div RowHeight)+1,
+			      SELF ! {row_select,ID,[{press,1},{row,Row}]};
+			 (_Signal, _Env) ->
+			      io:format("bad select signal=~w, env=~w\n",
+					[_Signal,_Env])
+		      end).
+
+%% install table header return next X location
+header(I,XOffs,YOffs,TxW,TxH,_W) ->
+    Y = I*TxH+YOffs,
     H = TxH,
     Opts = [{font_color,white}, {color,black}, {fill,solid}],
-    X0 = 3,
+    X0 = XOffs,
     W0 = 6*TxW,
     text_cell("serial_header", X0, Y, W0, H,
 	      [{text,"Serial"},{halign,right}|Opts]),
@@ -209,15 +289,16 @@ header(I,TxW,TxH,_W) ->
     X4 = X3 + W3 + 1,
     W4 = 5*TxW,
     text_cell("status_header", X4, Y, W4, H,
-	      [{text,"Status"},{halign,center}|Opts]).
+	      [{text,"Status"},{halign,center}|Opts]),
+    X4 + W4 + 1.
 
-
-row(I,TxW,TxH,_W) ->
+%% install table row return next X location
+row(I,XOffs,YOffs,TxW,TxH,_W) ->
     II = integer_to_list(I),
-    Y = I*TxH+3,
+    Y = I*TxH+YOffs,
     H = TxH,
 
-    X0 = 3,
+    X0 = XOffs,
     W0 = 6*TxW,
     text_cell("serial_"++II, X0, Y, W0, H,
 	      [{text,""},{halign,right}]),
@@ -236,7 +317,9 @@ row(I,TxW,TxH,_W) ->
     X4 = X3 + W3 + 1,
     W4 = 5*TxW,
     text_cell("status_"++II, X4, Y, W4, H,
-	      [{text,""},{halign,center}]).
+	      [{text,""},{halign,center}]),
+    X4 + W4 + 1.
+
 
 text_cell(ID, X, Y, W, H, Opts) ->
     text(ID, X, Y, W, H, Opts),
@@ -254,6 +337,162 @@ border(ID,X,Y,W,H,_Opts) ->
 		       [{id,ID++".border"},{type,rectangle},
 			{color,black},{x,X},{y,Y},{width,W+1},{height,H+1}]).
 
+%% draw various "widgets"
+control_demo(X, Y, W, H) ->
+    bridgeZone(X,Y,W,H).
+
+%% bridgeZone layout
+bridgeZone(X,Y,W,H) ->
+    Y1 = Y+10,
+    X1 = X+10,
+    X2 = X+10+64,
+    
+    %% Aout x 2 (row=Y1,column X1)
+    XAout = X1,
+    YAout = Y1,
+    WAout = 32,
+    HAout = 12,
+    aout("aout_1", XAout, YAout+0,  WAout, HAout),
+    aout("aout_2", XAout, YAout+16, WAout, HAout),
+
+    Y2 = YAout+32,
+    %% Ain x 4 (row=Y2,column=X1)
+    XAin  = X1,
+    YAin  = Y2,
+    WAin = 24,
+    HAin = 12,
+    ain("ain_1",  XAin, YAin+0,  WAin, HAin),
+    ain("ain_2",  XAin, YAin+16, WAin, HAin),
+    ain("ain_3",  XAin, YAin+32, WAin, HAin),
+    ain("ain_4",  XAin, YAin+48, WAin, HAin),
+
+    %% Pout x 4 (row=Y2,column=X2)
+    XPout  = X2,
+    YPout  = Y2,
+    WPout  = 32,
+    HPout  = 12,
+    pout("pout_1",  XPout, YPout+0, WPout, HPout),
+    pout("pout_2",  XPout, YPout+16, WPout, HPout),
+    pout("pout_3",  XPout, YPout+32, WPout, HPout),
+    pout("pout_4",  XPout, YPout+48, WPout, HPout),
+    
+    Y3 = YAin+72,
+    %% Din x 4 (row Y3,column=X1)
+    XDin = X1,
+    YDin = Y3,
+    WDin = 24,
+    HDin = 12,
+    din("din_1", XDin, YDin+0, WDin, HDin),
+    din("din_2", XDin, YDin+16, WDin, HDin),
+    din("din_3", XDin, YDin+32, WDin, HDin),
+    din("din_4", XDin, YDin+48, WDin, HDin),
+
+    %% Dout x 4 (row Y3,column=X2)
+    XDout = X2,
+    YDout = Y3,
+    WDout = 24,
+    HDout = 12,
+    dout("dout_1", XDout, YDout+0, WDout, HDout),
+    dout("dout_2", XDout, YDout+16, WDout, HDout),
+    dout("dout_3", XDout, YDout+32, WDout, HDout),
+    dout("dout_4", XDout, YDout+48, WDout, HDout),
+
+    ok.
+
+    
+
+dout(ID, X, Y, W, H) ->
+    SELF = self(),
+    hex_epx:init_event(in,
+		       [{id,ID},{type,switch},
+			{halign,center},
+			{x,X},{y,Y},{width,W},{height,H},
+			{shadow_x,3},{shadow_y,3},{children_first,false},
+			{font,[{name,"Arial"},{weight,bold},{size,10}]},
+			{fill,solid},{color,lightgray},
+			{text,"OFF"}
+		       ]),
+    hex_epx:add_event([{id,ID}],switch,
+		      fun(Signal,Env) ->
+			      SELF ! {Signal,ID,Env}
+		      end),
+    ok.
+
+din(ID, X, Y, W, H) ->
+    hex_epx:init_event(out,
+		       [{id,ID},{type,value},
+			{halign,center},{valign,center},
+			{x,X},{y,Y},{width,W},{height,H},
+			{children_first,false},
+			{font,[{name,"Arial"},{weight,bold},{size,10}]},
+			{fill,solid},{color,white},
+			{format,"~w"}
+		       ]),
+    hex_epx:init_event(out,
+		       [{id,ID++".border"},
+			{type,rectangle},
+			{color,black},
+			{relative,true},
+			{x,-1},{y,-1},
+			{width,W+2},{height,H+2}]),
+    ok.
+
+ain(ID, X, Y, W, H) ->
+    hex_epx:init_event(out,
+		       [{id,ID},{type,value},
+			{halign,center},{valign,center},
+			{x,X},{y,Y},{width,W},{height,H},
+			{children_first,false},
+			{font,[{name,"Arial"},{weight,bold},{size,10}]},
+			{fill,solid},{color,white},
+			{format,"~5w"},
+			{value,0}
+		       ]),
+    hex_epx:init_event(out,
+		       [{id,ID++".border"},
+			{type,rectangle},
+			{color,black},
+			{relative,true},
+			{x,-1},{y,-1},
+			{width,W+2},{height,H+2}]),
+    ok.
+
+aout(ID, X, Y, W, H) ->
+    SELF = self(),
+    hex_epx:init_event(in,
+		       [{id,ID},{type,slider},
+			{x,X},{y,Y},{width,W},{height,8},
+			{fill,solid},{color,lightBlue},
+			{min,0},{max,65535},
+			{orientation, horizontal},
+			{border,1}
+			%% {topimage, "$/gordon//priv/knob.png"}
+		       ]),
+    hex_epx:add_event([{id,ID}],analog,
+		      fun(Signal,Env) ->
+			      SELF ! {Signal,ID,Env}
+		      end),
+    ok.
+
+pout(ID, X, Y, W, H) ->
+    SELF = self(),
+    hex_epx:init_event(in,
+		       [{id,ID},{type,slider},
+			{x,X},{y,Y},{width,W},{height,6},
+			{fill,solid},{color,lightGreen},
+			{min,0},{max,65535},
+			{orientation, horizontal},
+			{border, 1}
+			%% {topimage, "$/gordon//priv/knob.png"}
+		       ]),
+    hex_epx:add_event([{id,ID}],analog,
+		      fun(Signal,Env) ->
+			      SELF ! {Signal,ID,Env}
+		      end),
+    ok.
+    
+
+
 pdo1_tx(CobID,Data,State) ->
     case Data of
 	<<16#80,?MSG_UBOOT_ON:16/little,_Si:8,Value:32/little>> ->
@@ -262,6 +501,9 @@ pdo1_tx(CobID,Data,State) ->
 	<<16#80,?MSG_POWER_ON:16/little,_Si:8,Value:32/little>> ->
 	    Serial = Value bsr 8,
 	    node_started(CobID, Serial, State);
+	<<16#80,?MSG_ECHO_REPLY:16/little,_Si:8,Value:32/little>> ->
+	    Serial = Value bsr 8,
+	    node_running(CobID, Serial, State);
 	<<16#80,Index:16/little,Si:8,Value:32/little>> ->
 	    node_message(CobID, Index, Si, Value, State);
 	_ ->
@@ -348,9 +590,53 @@ node_started(_CobId, Serial, State) ->
       end),
     {noreply, State#state { nodes=Nodes }}.
 
-node_message(_CobID, Index, Si, Value, State) ->
-    io:format("Value index=~w:~w value=~w\n", [Index,Si,Value]),
-    {noreply, State}.
+node_running(_CobId, Serial, State) ->
+    io:format("Node ~6.16.0B running\n", [Serial]),
+    %% FIXME: fix boot check
+    Nodes = set_status_by_serial(Serial, up, State#state.nodes),
+    spawn(
+      fun() ->
+	      XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
+	      io:format("XCobId = ~8.16.0B\n", [XCobId]),
+	      send_sdo_rx(XCobId, ?INDEX_ID, 0),
+	      send_sdo_rx(XCobId, ?IX_IDENTITY_OBJECT, ?SI_IDENTITY_PRODUCT)
+	      %% ...
+      end),
+    {noreply, State#state { nodes=Nodes }}.
+
+
+node_message(CobID, Index, Si, Value, State) ->
+    if CobID =:= State#state.selected_eff;
+       CobID =:= State#state.selected_sff ->
+	    node_data(Index, Si, Value, State);
+       true ->
+	    io:format("Value index=~w:~w value=~w\n", [Index,Si,Value]),
+	    {noreply, State}
+    end.
+
+node_data(Index, Si, Value, State) ->
+    case Index of
+	?MSG_ANALOG ->
+	    case Si of %% bridgeZone
+		37 -> hex_epx:output([{id,"ain_1"}],[{value,Value}]);
+		38 -> hex_epx:output([{id,"ain_2"}],[{value,Value}]);
+		39 -> hex_epx:output([{id,"ain_3"}],[{value,Value}]);
+		40 -> hex_epx:output([{id,"ain_4"}],[{value,Value}]);
+		_ -> ignore
+	    end;
+	?MSG_DIGITAL ->
+	    case Si of %% bridgeZone
+		33 -> hex_epx:output([{id,"din_1"}],[{value,Value}]);
+		34 -> hex_epx:output([{id,"din_2"}],[{value,Value}]);
+		35 -> hex_epx:output([{id,"din_3"}],[{value,Value}]);
+		46 -> hex_epx:output([{id,"din_4"}],[{value,Value}]);
+		_ -> ignore
+	    end;
+	_ ->
+	    ignore
+    end,
+    {noreply,State}.
+
 
 set_status_by_serial(Serial, Status, Ns) ->
     case take_node_by_serial(Serial, Ns) of
@@ -368,7 +654,7 @@ set_status_by_serial(Serial, Status, Ns) ->
 set_value_by_cobid(CobId,Index,SubInd,Value,State) ->
     case Index of
 	?INDEX_ID ->
-	    set_by_cobid(CobId,id,integer_to_list(Value),State);
+	    set_by_cobid(CobId,id,Value,State);
 	?IX_IDENTITY_OBJECT when SubInd =:= ?SI_IDENTITY_PRODUCT ->
 	    Product = (Value bsr 16) band 16#ff,
 	    %% _Variant = (Value bsr 24) band 16#ff,
@@ -400,11 +686,11 @@ set_by_cobid(CobID,Key,Value,State) ->
 		false ->
 		    Pos = length(Ns)+1,
 		    set_text(serial,Pos,serial_to_text(Serial)),
-		    set_text(Key,Pos,Value),
+		    set_text(Key,Pos,to_text(Value)),
 		    N = #{ pos=>Pos, serial=>Serial, Key=>Value },
 		    State#state { nodes=[N|Ns]};
 		{value,N=#{ pos := Pos},Ns1} ->
-		    set_text(Key,Pos,Value),
+		    set_text(Key,Pos,to_text(Value)),
 		    N1 = N#{ Key => Value },
 		    State#state { nodes=[N1|Ns1]}
 	    end;
@@ -414,27 +700,33 @@ set_by_cobid(CobID,Key,Value,State) ->
 	    case take_node_by_id(ID, Ns) of
 		false ->
 		    Pos = length(Ns)+1,
-		    set_text(id,Pos,id_to_text(ID)),
-		    set_text(Key,Pos,Value),
+		    set_text(id,Pos,to_text(ID)),
+		    set_text(Key,Pos,to_text(Value)),
 		    N = #{ pos=>Pos, id=>ID, Key=>Value },
 		    State#state { nodes=[N|Ns]};
 		{value,N=#{ pos := Pos},Ns1} ->
-		    set_text(Key,Pos,Value),
+		    set_text(Key,Pos,to_text(Value)),
 		    N1 = N#{ Key => Value },
 		    State#state { nodes=[N1|Ns1]}
 	    end
     end.
+
+to_text(Int) when is_integer(Int) -> integer_to_list(Int);
+to_text(Text) when is_atom(Text) -> Text;
+to_text(Text) when is_list(Text) -> Text.
 	    
 set_text(Key,Pos,Value) ->
     ID = atom_to_list(Key) ++ "_" ++ integer_to_list(Pos),
     io:format("set_text: id=~s, value=~s\n", [ID,Value]),
     hex_epx:output([{id,ID}],[{text,Value}]).
 
+set_value(Key,Pos,Value) ->
+    ID = atom_to_list(Key) ++ "_" ++ integer_to_list(Pos),
+    io:format("set_value: id=~s, value=~p\n", [ID,Value]),
+    hex_epx:output([{id,ID}],[{value,Value}]).
+
 serial_to_text(Serial) ->
     tl(integer_to_list(16#1000000 + Serial, 16)).
-
-id_to_text(ID) ->
-    integer_to_list(ID).
 
 %% find node with Serial
 take_node_by_serial(Serial, Ns) ->
@@ -447,7 +739,6 @@ take_node_by_serial(Serial, [Node|Ns], Ms) ->
 take_node_by_serial(_Serial, [], _Ms) ->
     false.
 
-
 %% find node with ID
 take_node_by_id(Id, Ns) ->
     take_node_by_id(Id, Ns, []).
@@ -457,4 +748,12 @@ take_node_by_id(Id, [Node=#{ id := Id}|Ns], Ms) ->
 take_node_by_id(Id, [Node|Ns], Ms) ->
     take_node_by_id(Id, Ns, [Node|Ms]);
 take_node_by_id(_Id, [], _Ms) ->
+    false.
+
+%% find node with pos
+find_node_by_pos(Pos, [Node=#{ pos := Pos}|Ns]) ->
+    {value,Node};
+find_node_by_pos(Pos, [Node|Ns]) ->
+    find_node_by_pos(Pos, Ns);
+find_node_by_pos(_Id, []) ->
     false.
