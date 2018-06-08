@@ -66,6 +66,7 @@ start_rpi() ->
     ok = application:load(epx),
     application:set_env(epx, backend, "fb"),
     application:set_env(epx, pixel_format, 'argb/little'),
+    application:set_env(epx, input_mouse_device, "/dev/input/event0"),
     application:load(gordon),
     can_router:start(),
     can_udp:start(),
