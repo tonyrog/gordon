@@ -53,6 +53,7 @@ start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
 start() ->
+    application:load(gordon),
     can_router:start(),
     can_udp:start(),
     hex_epx_server:start_link([{width,640}, {height,480}]),
@@ -90,6 +91,9 @@ init(Options) ->
     control_demo(Width div 2, 10, Width, Height),
 
     can_router:attach(),
+
+    send_pdo1_tx(0, ?MSG_ECHO_REQUEST, 0, 0),
+
     {ok, #state{}}.
 
 %%--------------------------------------------------------------------
@@ -154,7 +158,7 @@ handle_info({event, screen, [{closed,true}]}, State) ->
     %% fixme: try to terminate gracefully
     {stop, normal, State};
 
-handle_info({row_select,ID,[{press,1},{row,R}]},State) ->
+handle_info({row_select,_ID,[{press,1},{row,R}]},State) ->
     case find_node_by_pos(R, State#state.nodes) of
 	false ->
 	    io:format("deselect old\n"),
@@ -169,20 +173,33 @@ handle_info({row_select,ID,[{press,1},{row,R}]},State) ->
 		      M -> ?COB_ID(?PDO1_TX,M)
 		  end,
 	    State1 = deselect_row(State#state.selected,State),
-	    State2 = State#state { selected = Node, 
-				   selected_eff = EFF,
-				   selected_sff = SFF },
+	    State2 = State1#state { selected = Node, 
+				    selected_eff = EFF,
+				    selected_sff = SFF },
+	    io:format("select row=~w, eff=~8.16.0B, sff=~3.16.0B\n",
+		      [R, EFF, SFF]),
 	    {noreply, State2}
     end;
-handle_info({row_select,ID,[{press,0},{row,R}]},State) ->
+handle_info({row_select,_ID,[{press,0},{row,_R}]},State) ->
     %% ignore mouse release
     {noreply, State};
 
 
 handle_info({switch,Label,[{value,Value}]},State) ->
+    SubInd = case Label of
+		 "dout_1" -> 7;
+		 "dout_2" -> 8;
+		 "dout_3" -> 9;
+		 "dout_4" -> 10;
+		 _ -> -1
+	     end,
     case Value of
-	0 -> hex_epx:output([{id,Label}],[{color,lightgray},{text,"OFF"}]);
-	1 -> hex_epx:output([{id,Label}],[{color,green},{text,"ON"}])
+	0 ->
+	    send_pdo2_tx(State#state.selected_eff,?MSG_DIGITAL,SubInd,0),
+	    hex_epx:output([{id,Label}],[{color,lightgray},{text,"OFF"}]);
+	1 ->
+	    send_pdo2_tx(State#state.selected_eff,?MSG_DIGITAL,SubInd,1),
+	    hex_epx:output([{id,Label}],[{color,green},{text,"ON"}])
     end,
     {noreply, State};    
 handle_info(_Info, State) ->
@@ -220,7 +237,7 @@ code_change(_OldVsn, State, _Extra) ->
 
 deselect_row(undefined, State) ->
     State;
-deselect_row(Row, State) ->
+deselect_row(_Row, State) ->
     State#state { selected=undefined }.
 
 %% Node table
@@ -259,7 +276,7 @@ selection_layer(XOffs,YOffs,NRows,RowHeight,TableWidth) ->
 			      SELF ! {row_select,ID,[{press,1},{row,Row}]};
 			 (_Signal,[{press,0},{x,_},{y,Y}|_]) ->
 			      Row = (Y div RowHeight)+1,
-			      SELF ! {row_select,ID,[{press,1},{row,Row}]};
+			      SELF ! {row_select,ID,[{press,0},{row,Row}]};
 			 (_Signal, _Env) ->
 			      io:format("bad select signal=~w, env=~w\n",
 					[_Signal,_Env])
@@ -346,60 +363,96 @@ bridgeZone(X,Y,W,H) ->
     Y1 = Y+10,
     X1 = X+10,
     X2 = X+10+64,
-    
-    %% Aout x 2 (row=Y1,column X1)
-    XAout = X1,
-    YAout = Y1,
-    WAout = 32,
-    HAout = 12,
-    aout("aout_1", XAout, YAout+0,  WAout, HAout),
-    aout("aout_2", XAout, YAout+16, WAout, HAout),
+    YGap = 10,
 
-    Y2 = YAout+32,
+    %% Aout x 2 (row=Y1,column X1)
+    {_,Y2,_W1,_H1} = aout_group("aout", X1, Y1),
+
     %% Ain x 4 (row=Y2,column=X1)
-    XAin  = X1,
-    YAin  = Y2,
-    WAin = 24,
-    HAin = 12,
-    ain("ain_1",  XAin, YAin+0,  WAin, HAin),
-    ain("ain_2",  XAin, YAin+16, WAin, HAin),
-    ain("ain_3",  XAin, YAin+32, WAin, HAin),
-    ain("ain_4",  XAin, YAin+48, WAin, HAin),
+    {_,Y3,_W2,_H2} = ain_group("ain",   X1, Y2+YGap),
+
+    %% Din x 4 (row Y3,column=X1)
+    {_,_,_W3,_H3} = din_group("din",    X1, Y3+YGap),
 
     %% Pout x 4 (row=Y2,column=X2)
-    XPout  = X2,
-    YPout  = Y2,
-    WPout  = 32,
-    HPout  = 12,
-    pout("pout_1",  XPout, YPout+0, WPout, HPout),
-    pout("pout_2",  XPout, YPout+16, WPout, HPout),
-    pout("pout_3",  XPout, YPout+32, WPout, HPout),
-    pout("pout_4",  XPout, YPout+48, WPout, HPout),
-    
-    Y3 = YAin+72,
-    %% Din x 4 (row Y3,column=X1)
-    XDin = X1,
-    YDin = Y3,
-    WDin = 24,
-    HDin = 12,
-    din("din_1", XDin, YDin+0, WDin, HDin),
-    din("din_2", XDin, YDin+16, WDin, HDin),
-    din("din_3", XDin, YDin+32, WDin, HDin),
-    din("din_4", XDin, YDin+48, WDin, HDin),
+    {_,Y4,_W4,_H4} = pout_group("pout", X2, Y2+YGap),
 
     %% Dout x 4 (row Y3,column=X2)
-    XDout = X2,
-    YDout = Y3,
-    WDout = 24,
-    HDout = 12,
-    dout("dout_1", XDout, YDout+0, WDout, HDout),
-    dout("dout_2", XDout, YDout+16, WDout, HDout),
-    dout("dout_3", XDout, YDout+32, WDout, HDout),
-    dout("dout_4", XDout, YDout+48, WDout, HDout),
-
+    {_,_,_W5,_H5} = dout_group("dout",  X2, Y4+YGap),
     ok.
 
-    
+%% build the analog out group return next Y value
+aout_group(ID, X0, Y0) ->
+    XLeft  = 12, XRight = 12,
+    YTop   = 12, YBot   = 12,
+    YGap   = 8,
+    {_,Y1,W1,_H1} = aout(ID++"_1", X0+XLeft, Y0+YTop),
+    {_,Y2,W2,_H2} = aout(ID++"_2", X0+XLeft, Y1+YGap),
+    Y3 = Y2+YBot,
+    H = Y3-Y0,
+    W = XLeft+max(W1,W2)+XRight,
+    group_rectangle(ID,"Aout",X0,Y0,W,H),
+    {X0,Y3,W,H}.
+
+%% build the pwm out group return next Y value
+pout_group(ID, X0, Y0) ->
+    XLeft  = 12, XRight = 12,
+    YTop   = 12, YBot  = 12,
+    YGap   = 8,
+    {_,Y1,W1,_H1} = pout(ID++"_1", X0+XLeft, Y0+YTop),
+    {_,Y2,W2,_H2} = pout(ID++"_2", X0+XLeft, Y1+YGap),
+    {_,Y3,W3,_H3} = pout(ID++"_3", X0+XLeft, Y2+YGap),
+    {_,Y4,W4,_H4} = pout(ID++"_4", X0+XLeft, Y3+YGap),
+    Y5 = Y4+YBot,
+    H = Y5-Y0,
+    W = XLeft+max(W1,W2)+XRight,
+    group_rectangle(ID,"Pout",X0,Y0,W,H),
+    {X0,Y5,W,H}.
+
+ain_group(ID, X0, Y0) ->
+    XLeft  = 8, XRight = 8,
+    YTop   = 12, YBot   = 8,
+    YGap   = 4,
+    {_,Y1,W1,_H1} = ain(ID++"_1", X0+XLeft, Y0+YTop),
+    {_,Y2,W2,_H2} = ain(ID++"_2", X0+XLeft, Y1+YGap),
+    {_,Y3,W3,_H3} = ain(ID++"_3", X0+XLeft, Y2+YGap),
+    {_,Y4,W4,_H4} = ain(ID++"_4", X0+XLeft, Y3+YGap),
+    Y5 = Y4+YBot,
+    H = Y5-Y0,
+    W = XLeft+max(W1,max(W2,max(W3,W4)))+XRight,
+    group_rectangle(ID,"Ain",X0,Y0,W,H),
+    {X0,Y5,W,H}.
+
+din_group(ID, X0, Y0) ->
+    XLeft  = 8, XRight = 8,
+    YTop   = 12, YBot   = 8,
+    YGap   = 4,
+    {_,Y1,W1,_H1} = din(ID++"_1", X0+XLeft, Y0+YTop),
+    {_,Y2,W2,_H2} = din(ID++"_2", X0+XLeft, Y1+YGap),
+    {_,Y3,W3,_H3} = din(ID++"_3", X0+XLeft, Y2+YGap),
+    {_,Y4,W4,_H4} = din(ID++"_4", X0+XLeft, Y3+YGap),
+    Y5 = Y4+YBot,
+    H = Y5-Y0,
+    W = XLeft+max(W1,max(W2,max(W3,W4)))+XRight,
+    group_rectangle(ID,"Din",X0,Y0,W,H),
+    {X0,Y5,W,H}.
+
+dout_group(ID, X0, Y0) ->
+    W0 = 24,
+    H0 = 12,
+    XLeft  = 8,  XRight = 8,
+    YTop   = 12, YBot  = 8,
+    YGap   = 8,
+    {_,Y1,W1,_H1} = dout(ID++"_1", X0+XLeft, Y0+YTop, W0, H0),
+    {_,Y2,W2,_H2} = dout(ID++"_2", X0+XLeft, Y1+YGap, W0, H0),
+    {_,Y3,W3,_H3} = dout(ID++"_3", X0+XLeft, Y2+YGap, W0, H0),
+    {_,Y4,W4,_H4} = dout(ID++"_4", X0+XLeft, Y3+YGap, W0, H0),
+    Y5 = Y4+YBot,
+    H = Y5-Y0,
+    W = XLeft+max(W1,max(W2,max(W3,W4)))+XRight,
+    group_rectangle(ID,"Dout",X0,Y0,W,H),
+    {X0,Y5,W,H}.
+
 
 dout(ID, X, Y, W, H) ->
     SELF = self(),
@@ -416,9 +469,11 @@ dout(ID, X, Y, W, H) ->
 		      fun(Signal,Env) ->
 			      SELF ! {Signal,ID,Env}
 		      end),
-    ok.
+    {X,Y+H+3,W+3,H+3}.
 
-din(ID, X, Y, W, H) ->
+din(ID, X, Y) ->
+    W = 24,
+    H = 12,
     hex_epx:init_event(out,
 		       [{id,ID},{type,value},
 			{halign,center},{valign,center},
@@ -435,9 +490,12 @@ din(ID, X, Y, W, H) ->
 			{relative,true},
 			{x,-1},{y,-1},
 			{width,W+2},{height,H+2}]),
-    ok.
+    {X,Y+H+2,W+2,H+2}.
 
-ain(ID, X, Y, W, H) ->
+
+ain(ID, X, Y) ->
+    W = 32,
+    H = 12,    
     hex_epx:init_event(out,
 		       [{id,ID},{type,value},
 			{halign,center},{valign,center},
@@ -455,42 +513,65 @@ ain(ID, X, Y, W, H) ->
 			{relative,true},
 			{x,-1},{y,-1},
 			{width,W+2},{height,H+2}]),
-    ok.
+    {X,Y+H+2,W+2,H+2}.
+    
 
-aout(ID, X, Y, W, H) ->
+aout(ID, X, Y) ->
+    W = 64,
+    H = 12,
     SELF = self(),
     hex_epx:init_event(in,
 		       [{id,ID},{type,slider},
-			{x,X},{y,Y},{width,W},{height,8},
+			{x,X+2},{y,Y+2},{width,W},{height,8},
 			{fill,solid},{color,lightBlue},
 			{min,0},{max,65535},
 			{orientation, horizontal},
-			{border,1}
-			%% {topimage, "$/gordon//priv/knob.png"}
+			{border,1},
+			{topimage, "$/gordon//priv/knob.png"}
 		       ]),
     hex_epx:add_event([{id,ID}],analog,
 		      fun(Signal,Env) ->
 			      SELF ! {Signal,ID,Env}
 		      end),
-    ok.
+    {X,Y+H,W,H}.
 
-pout(ID, X, Y, W, H) ->
+pout(ID, X, Y) ->
+    W = 64,
+    H = 12,
     SELF = self(),
     hex_epx:init_event(in,
 		       [{id,ID},{type,slider},
-			{x,X},{y,Y},{width,W},{height,6},
+			{x,X+2},{y,Y+2},{width,W},{height,8},
 			{fill,solid},{color,lightGreen},
 			{min,0},{max,65535},
 			{orientation, horizontal},
-			{border, 1}
-			%% {topimage, "$/gordon//priv/knob.png"}
+			{border, 1},
+			{topimage, "$/gordon//priv/knob.png"}
 		       ]),
     hex_epx:add_event([{id,ID}],analog,
 		      fun(Signal,Env) ->
 			      SELF ! {Signal,ID,Env}
 		      end),
-    ok.
-    
+    {X,Y+H,W,H}.
+
+
+group_rectangle(ID,Text,X,Y,W,H) ->
+    hex_epx:init_event(out,
+		       [{id,ID++"-border"},
+			{type,rectangle},
+			{color,black},{x,X},{y,Y},
+			{width,W},{height,H}]),
+    hex_epx:init_event(out,
+		       [{id,ID++"-text"},
+			{type,text},
+			{font,[{name,"Arial"},{slant,roman},{size,10}]},
+			{text,Text},
+			{color,white},{fill,solid},
+			{halign,center},
+			{x,X+3},{y,Y-5},
+			{width,25},{height,10}
+		       ]).
+
 
 
 pdo1_tx(CobID,Data,State) ->
@@ -529,6 +610,43 @@ sdo_rx(CobID,Bin,State) ->
 		      [integer_to_list(CobID,16)])
     end,
     {noreply,State}.
+
+%% send PDO1_TX message
+send_pdo1_tx(CobId, Index, SubInd, Value) ->
+    Bin = <<16#80:8,Index:16/little,SubInd:8,Value:32/little>>,
+    CobId1 = case ?is_cobid_extended(CobId) of
+		 true ->
+		     NodeId = ?XNODE_ID(CobId),
+		     ?XCOB_ID(?PDO1_TX,NodeId);
+		 false ->
+		     NodeId = ?NODE_ID(CobId),
+		     ?COB_ID(?PDO1_TX,NodeId)
+	     end,
+    CanId = ?COBID_TO_CANID(CobId1),
+    Frame = #can_frame { id=CanId,len=8,data=Bin},
+    can:send(Frame).
+
+
+%% send PDO2_TX message (analog/digital etc)
+send_pdo2_tx(0, _Index, _SubInd, _Value) ->
+    ok;
+send_pdo2_tx(_CobId, _Index, -1, _Value) ->
+    ok;
+send_pdo2_tx(CobId, Index, SubInd, Value) ->
+    Bin = <<16#80:8,Index:16/little,SubInd:8,Value:32/little>>,
+    CobId1 = case ?is_cobid_extended(CobId) of
+		 true ->
+		     NodeId = ?XNODE_ID(CobId),
+		     ?XCOB_ID(?PDO2_TX,NodeId);
+		 false ->
+		     NodeId = ?NODE_ID(CobId),
+		     ?COB_ID(?PDO2_TX,NodeId)
+	     end,
+    CanId = ?COBID_TO_CANID(CobId1),
+    Frame = #can_frame { id=CanId,len=8,data=Bin},
+    can:send(Frame).
+
+
 
 %% generate a request to read node values
 send_sdo_rx(CobId, Index, SubInd) ->
@@ -629,7 +747,7 @@ node_data(Index, Si, Value, State) ->
 		33 -> hex_epx:output([{id,"din_1"}],[{value,Value}]);
 		34 -> hex_epx:output([{id,"din_2"}],[{value,Value}]);
 		35 -> hex_epx:output([{id,"din_3"}],[{value,Value}]);
-		46 -> hex_epx:output([{id,"din_4"}],[{value,Value}]);
+		36 -> hex_epx:output([{id,"din_4"}],[{value,Value}]);
 		_ -> ignore
 	    end;
 	_ ->
