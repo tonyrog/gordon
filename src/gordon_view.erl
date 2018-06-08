@@ -17,6 +17,7 @@
 
 %% API
 -export([start_link/0, start/0]).
+-export([start_rpi/0]).
 
 %%-export([serial_flash_bootloader/0]).
 %%-export([can_flash_bootloader/1]).
@@ -61,6 +62,18 @@ start() ->
     gen_server:start({local, ?SERVER}, ?MODULE, [{width,640}, {height,480}],
 		     []).
 
+%% start rpi with touch screen
+start_rpi() ->
+    application:load(gordon),
+    can_router:start(),
+    can_udp:start(),
+    epx_backend:start_link([{backend,"fb"},{pixel_format,'argb/little'}]),
+    hex_epx_server:start_link([{width,800}, {height,480}]),
+    %% application:start(hex_epx),
+    gen_server:start({local, ?SERVER}, ?MODULE, [{width,800},{height,480}],
+		     []).
+    
+
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
@@ -92,6 +105,7 @@ init(Options) ->
 
     can_router:attach(),
 
+    %% request response from all nodes
     send_pdo1_tx(0, ?MSG_ECHO_REQUEST, 0, 0),
 
     {ok, #state{}}.
@@ -161,7 +175,7 @@ handle_info({event, screen, [{closed,true}]}, State) ->
 handle_info({row_select,_ID,[{press,1},{row,R}]},State) ->
     case find_node_by_pos(R, State#state.nodes) of
 	false ->
-	    io:format("deselect old\n"),
+	    io:format("deselect row=~w\n", [State#state.selected]),
 	    {noreply, deselect_row(State#state.selected,State)};
 	{value,Node} ->
 	    EFF = case maps:get(serial,Node,0) of
@@ -172,6 +186,7 @@ handle_info({row_select,_ID,[{press,1},{row,R}]},State) ->
 		      0 -> 0;
 		      M -> ?COB_ID(?PDO1_TX,M)
 		  end,
+	    io:format("deselect row=~w\n", [State#state.selected]),
 	    State1 = deselect_row(State#state.selected,State),
 	    State2 = State1#state { selected = Node, 
 				    selected_eff = EFF,
@@ -187,10 +202,10 @@ handle_info({row_select,_ID,[{press,0},{row,_R}]},State) ->
 
 handle_info({switch,Label,[{value,Value}]},State) ->
     SubInd = case Label of
-		 "dout_1" -> 7;
-		 "dout_2" -> 8;
-		 "dout_3" -> 9;
-		 "dout_4" -> 10;
+		 "dout_7" -> 7;
+		 "dout_8" -> 8;
+		 "dout_9" -> 9;
+		 "dout_10" -> 10;
 		 _ -> -1
 	     end,
     case Value of
@@ -366,95 +381,131 @@ bridgeZone(X,Y,_W,_H) ->
     YGap = 10,
 
     %% Aout x 2 (row=Y1,column X1)
-    {_,Y2,_W1,_H1} = aout_group("aout", X1, Y1),
+    {_,Y2,_W1,_H1} = aout_group("aout", 5, 6, X1, Y1),
 
     %% Ain x 4 (row=Y2,column=X1)
-    {_,Y3,_W2,_H2} = ain_group("ain",   X1, Y2+YGap),
+    {_,Y3,_W2,_H2} = ain_group("ain", 37, 40, X1, Y2+YGap),
 
     %% Din x 4 (row Y3,column=X1)
-    {_,_,_W3,_H3} = din_group("din",    X1, Y3+YGap),
+    {_,_,_W3,_H3} = din_group("din", 33, 36, X1, Y3+YGap),
 
     %% Pout x 4 (row=Y2,column=X2)
-    {_,Y4,_W4,_H4} = pout_group("pout", X2, Y2+YGap),
+    {_,Y4,_W4,_H4} = pout_group("pout", 1, 4, X2, Y2+YGap),
 
     %% Dout x 4 (row Y3,column=X2)
-    {_,_,_W5,_H5} = dout_group("dout",  X2, Y4+YGap),
+    {_,_,_W5,_H5} = dout_group("dout", 7, 10, X2, Y4+YGap),
+    ok.
+
+ioZone(X,Y,_W,_H) ->
+    Y1 = Y+10,
+    X1 = X+10,
+    X2 = X+10+64,
+    YGap = 10,
+
+    %% Ain x 4 (row=Y1,column=X1)
+    {_,Y3,_W2,_H2} = ain_group("ain", 65, 68, X1, Y1),
+
+    %% Din x 12 (row Y3,column=X1) support iozone24?
+    {_,_,_W3,_H3} = din_group("din", 33, 44, X1, Y3+YGap),
+
+    %% Dout x 8 (row Y3,column=X2)
+    {_,_,_W5,_H5} = dout_group("dout", 1, 8, X2, Y1),
+    ok.
+
+powerZone(X,Y,_W,_H) ->
+    Y1 = Y+10,
+    X1 = X+10,
+    X2 = X+10+64,
+    YGap = 10,
+
+    %% Ain x 8 (row=Y1,column=X1)
+    {_,Y3,_W2,_H2} = ain_group("ain", 1, 8, X1, Y1),
+
+    %% Dout x 4 (row Y1,column=X2)
+    {_,_,_W5,_H5} = dout_group("dout", 1, 8, X2, Y1),
     ok.
 
 %% build the analog out group return next Y value
-aout_group(ID, X0, Y0) ->
+aout_group(ID, Chan0, Chan1, X0, Y0) ->
     XLeft  = 12, XRight = 12,
     YTop   = 12, YBot   = 12,
     YGap   = 8,
-    {_,Y1,W1,_H1} = aout(ID++"_1", X0+XLeft, Y0+YTop),
-    {_,Y2,W2,_H2} = aout(ID++"_2", X0+XLeft, Y1+YGap),
+    {Y2,W2} = lists:foldl(
+		fun(Chan, {Yi,Wi}) ->
+			{_,Y1,W1,_H1} = aout(Chan, X0+XLeft, Yi),
+			{Y1+YGap, max(Wi,W1)}
+		end, {Y0+YTop,0}, lists:seq(Chan0, Chan1)),
     Y3 = Y2+YBot,
     H = Y3-Y0,
-    W = XLeft+max(W1,W2)+XRight,
+    W = XLeft+W2+XRight,
     group_rectangle(ID,"Aout",X0,Y0,W,H),
     {X0,Y3,W,H}.
 
 %% build the pwm out group return next Y value
-pout_group(ID, X0, Y0) ->
+pout_group(ID, Chan0, Chan1, X0, Y0) ->
     XLeft  = 12, XRight = 12,
     YTop   = 12, YBot  = 12,
     YGap   = 8,
-    {_,Y1,W1,_H1} = pout(ID++"_1", X0+XLeft, Y0+YTop),
-    {_,Y2,W2,_H2} = pout(ID++"_2", X0+XLeft, Y1+YGap),
-    {_,Y3,W3,_H3} = pout(ID++"_3", X0+XLeft, Y2+YGap),
-    {_,Y4,W4,_H4} = pout(ID++"_4", X0+XLeft, Y3+YGap),
-    Y5 = Y4+YBot,
-    H = Y5-Y0,
-    W = XLeft+max(W1,max(W2,max(W3,W4)))+XRight,
+    {Y2,W2} = lists:foldl(
+		fun(Chan, {Yi,Wi}) ->
+			{_,Y1,W1,_H1} = pout(Chan, X0+XLeft, Yi),
+			{Y1+YGap, max(Wi,W1)}
+		end, {Y0+YTop,0}, lists:seq(Chan0, Chan1)),
+    Y3 = Y2+YBot,
+    H = Y3-Y0,
+    W = XLeft+W2+XRight,
     group_rectangle(ID,"Pout",X0,Y0,W,H),
-    {X0,Y5,W,H}.
+    {X0,Y3,W,H}.
 
-ain_group(ID, X0, Y0) ->
+ain_group(ID, Chan0, Chan1, X0, Y0) ->
     XLeft  = 8, XRight = 8,
     YTop   = 12, YBot   = 8,
     YGap   = 4,
-    {_,Y1,W1,_H1} = ain(ID++"_1", X0+XLeft, Y0+YTop),
-    {_,Y2,W2,_H2} = ain(ID++"_2", X0+XLeft, Y1+YGap),
-    {_,Y3,W3,_H3} = ain(ID++"_3", X0+XLeft, Y2+YGap),
-    {_,Y4,W4,_H4} = ain(ID++"_4", X0+XLeft, Y3+YGap),
-    Y5 = Y4+YBot,
-    H = Y5-Y0,
-    W = XLeft+max(W1,max(W2,max(W3,W4)))+XRight,
+    {Y2,W2} = lists:foldl(
+		fun(Chan, {Yi,Wi}) ->
+			{_,Y1,W1,_H1} = ain(Chan, X0+XLeft, Yi),
+			{Y1+YGap, max(Wi,W1)}
+		end, {Y0+YTop,0}, lists:seq(Chan0, Chan1)),
+    Y3 = Y2-YGap+YBot,
+    H = Y3-Y0,
+    W = XLeft+W2+XRight,
     group_rectangle(ID,"Ain",X0,Y0,W,H),
-    {X0,Y5,W,H}.
+    {X0,Y3,W,H}.
 
-din_group(ID, X0, Y0) ->
+din_group(ID, Chan0, Chan1, X0, Y0) ->
     XLeft  = 8, XRight = 8,
     YTop   = 12, YBot   = 8,
     YGap   = 4,
-    {_,Y1,W1,_H1} = din(ID++"_1", X0+XLeft, Y0+YTop),
-    {_,Y2,W2,_H2} = din(ID++"_2", X0+XLeft, Y1+YGap),
-    {_,Y3,W3,_H3} = din(ID++"_3", X0+XLeft, Y2+YGap),
-    {_,Y4,W4,_H4} = din(ID++"_4", X0+XLeft, Y3+YGap),
-    Y5 = Y4+YBot,
-    H = Y5-Y0,
-    W = XLeft+max(W1,max(W2,max(W3,W4)))+XRight,
+    {Y2,W2} = lists:foldl(
+		fun(Chan, {Yi,Wi}) ->
+			{_,Y1,W1,_H1} = din(Chan, X0+XLeft, Yi),
+			{Y1+YGap, max(Wi,W1)}
+		end, {Y0+YTop,0}, lists:seq(Chan0, Chan1)),
+    Y3 = Y2-YGap+YBot,
+    H = Y3-Y0,
+    W = XLeft+W2+XRight,
     group_rectangle(ID,"Din",X0,Y0,W,H),
-    {X0,Y5,W,H}.
+    {X0,Y3,W,H}.
 
-dout_group(ID, X0, Y0) ->
-    W0 = 24,
-    H0 = 12,
+dout_group(ID, Chan0, Chan1, X0, Y0) ->
     XLeft  = 8,  XRight = 8,
     YTop   = 12, YBot  = 8,
     YGap   = 8,
-    {_,Y1,W1,_H1} = dout(ID++"_1", X0+XLeft, Y0+YTop, W0, H0),
-    {_,Y2,W2,_H2} = dout(ID++"_2", X0+XLeft, Y1+YGap, W0, H0),
-    {_,Y3,W3,_H3} = dout(ID++"_3", X0+XLeft, Y2+YGap, W0, H0),
-    {_,Y4,W4,_H4} = dout(ID++"_4", X0+XLeft, Y3+YGap, W0, H0),
-    Y5 = Y4+YBot,
-    H = Y5-Y0,
-    W = XLeft+max(W1,max(W2,max(W3,W4)))+XRight,
+    {Y2,W2} = lists:foldl(
+		fun(Chan, {Yi,Wi}) ->
+			{_,Y1,W1,_H1} = dout(Chan, X0+XLeft, Yi),
+			{Y1+YGap, max(Wi,W1)}
+		end, {Y0+YTop,0}, lists:seq(Chan0, Chan1)),
+    Y3 = Y2-YGap+YBot,
+    H = Y3-Y0,
+    W = XLeft+W2+XRight,
     group_rectangle(ID,"Dout",X0,Y0,W,H),
-    {X0,Y5,W,H}.
+    {X0,Y3,W,H}.
 
 
-dout(ID, X, Y, W, H) ->
+dout(Chan, X, Y) ->
+    ID = "dout_"++integer_to_list(Chan),
+    W = 24, H = 12,
     SELF = self(),
     hex_epx:init_event(in,
 		       [{id,ID},{type,switch},
@@ -471,9 +522,9 @@ dout(ID, X, Y, W, H) ->
 		      end),
     {X,Y+H+3,W+3,H+3}.
 
-din(ID, X, Y) ->
-    W = 24,
-    H = 12,
+din(Chan, X, Y) ->
+    ID = "din_"++integer_to_list(Chan),
+    W = 24, H = 12,
     hex_epx:init_event(out,
 		       [{id,ID},{type,value},
 			{halign,center},{valign,center},
@@ -493,9 +544,9 @@ din(ID, X, Y) ->
     {X,Y+H+2,W+2,H+2}.
 
 
-ain(ID, X, Y) ->
-    W = 32,
-    H = 12,    
+ain(Chan, X, Y) ->
+    ID = "ain_"++integer_to_list(Chan),
+    W = 32, H = 12,    
     hex_epx:init_event(out,
 		       [{id,ID},{type,value},
 			{halign,center},{valign,center},
@@ -516,9 +567,9 @@ ain(ID, X, Y) ->
     {X,Y+H+2,W+2,H+2}.
     
 
-aout(ID, X, Y) ->
-    W = 64,
-    H = 12,
+aout(Chan, X, Y) ->
+    ID = "aout_"++integer_to_list(Chan),
+    W = 64, H = 12,
     SELF = self(),
     hex_epx:init_event(in,
 		       [{id,ID},{type,slider},
@@ -535,9 +586,9 @@ aout(ID, X, Y) ->
 		      end),
     {X,Y+H,W,H}.
 
-pout(ID, X, Y) ->
-    W = 64,
-    H = 12,
+pout(Chan, X, Y) ->
+    ID = "aout_"++integer_to_list(Chan),
+    W = 64, H = 12,
     SELF = self(),
     hex_epx:init_event(in,
 		       [{id,ID},{type,slider},
@@ -727,12 +778,15 @@ node_running(_CobId, Serial, State) ->
 		      send_sdo_rx(XCobId, ?INDEX_ID, 0),
 		      send_sdo_rx(XCobId, ?IX_IDENTITY_OBJECT,
 				  ?SI_IDENTITY_PRODUCT),
-		      send_sdo_rx(XCobId, ?INDEX_BOOT_VSN, 0)
+		      send_sdo_rx(XCobId, ?INDEX_BOOT_VSN, 0),
+		      send_pdo1_tx(XCobId, ?MSG_REFRESH, 0, 0)
 		      %% ...
 	      end),
 	    {noreply, State};
 	{value,_Node} ->
 	    %% Node is present in node list
+	    %% XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
+	    %% send_pdo1_tx(XCobId, ?MSG_REFRESH, 0, 0)
 	    {noreply, State}
     end.
 
@@ -749,20 +803,33 @@ node_message(CobID, Index, Si, Value, State) ->
 node_data(Index, Si, Value, State) ->
     case Index of
 	?MSG_ANALOG ->
-	    case Si of %% bridgeZone
-		37 -> hex_epx:output([{id,"ain_1"}],[{value,Value}]);
-		38 -> hex_epx:output([{id,"ain_2"}],[{value,Value}]);
-		39 -> hex_epx:output([{id,"ain_3"}],[{value,Value}]);
-		40 -> hex_epx:output([{id,"ain_4"}],[{value,Value}]);
-		_ -> ignore
+	    if Si >= 37, Si =< 40;  %% bridgeZone 37-40
+	       Si >= 65, Si =< 68 ->  %% ioZone 65-68
+		    ID = "ain_"++integer_to_list(Si),
+		    hex_epx:output([{id,ID}],[{value,Value}]);
+	       true ->
+		    ignore
 	    end;
+
 	?MSG_DIGITAL ->
-	    case Si of %% bridgeZone
-		33 -> hex_epx:output([{id,"din_1"}],[{value,Value}]);
-		34 -> hex_epx:output([{id,"din_2"}],[{value,Value}]);
-		35 -> hex_epx:output([{id,"din_3"}],[{value,Value}]);
-		36 -> hex_epx:output([{id,"din_4"}],[{value,Value}]);
-		_ -> ignore
+	    if Si >= 33, Si =< 36;    %% bridgeZone 33-36
+	       Si >= 33, Si =< 44;    %% ioZone12 33-44
+	       Si >= 33, Si =< 64 ->  %% ioZone24 33-64
+		    ID = "din_"++integer_to_list(Si),
+		    hex_epx:output([{id,ID}],[{value,Value}]);
+	       true ->
+		    ignore
+	    end;
+
+	?MSG_OUTPUT_STATE ->
+	    OnOff = (Value bsr 24) band 16#ff,
+	    State = (Value bsr 16) band 16#ff,
+	    Duty  = Value band 16#ffff,
+	    case Si of
+		%% bridge zone: Pout=1-4, Aout =5-6, Dout=7-10
+		%% ioZone:      Dout 1-8
+		%% powerZone:   Pout=1-8
+		_ -> ok
 	    end;
 	_ ->
 	    ignore
