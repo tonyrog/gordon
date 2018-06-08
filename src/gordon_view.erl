@@ -57,22 +57,22 @@ start() ->
     application:load(gordon),
     can_router:start(),
     can_udp:start(),
-    hex_epx_server:start_link([{width,640}, {height,480}]),
-    %% application:start(hex_epx),
-    gen_server:start({local, ?SERVER}, ?MODULE, [{width,640}, {height,480}],
+    hex_epx_server:start_link([{width,800}, {height,480}]),
+    gen_server:start({local, ?SERVER}, ?MODULE, [{width,800}, {height,480}],
 		     []).
 
 %% start rpi with touch screen
 start_rpi() ->
+    ok = application:load(epx),
+    application:set_env(epx, backend, "fb"),
+    application:set_env(epx, pixel_format, 'argb/little'),
     application:load(gordon),
     can_router:start(),
     can_udp:start(),
-    epx_backend:start_link([{backend,"fb"},{pixel_format,'argb/little'}]),
+    %% can_usb:start(0),
     hex_epx_server:start_link([{width,800}, {height,480}]),
-    %% application:start(hex_epx),
     gen_server:start({local, ?SERVER}, ?MODULE, [{width,800},{height,480}],
 		     []).
-    
 
 %%%===================================================================
 %%% gen_server callbacks
