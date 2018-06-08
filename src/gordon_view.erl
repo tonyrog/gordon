@@ -359,7 +359,7 @@ control_demo(X, Y, W, H) ->
     bridgeZone(X,Y,W,H).
 
 %% bridgeZone layout
-bridgeZone(X,Y,W,H) ->
+bridgeZone(X,Y,_W,_H) ->
     Y1 = Y+10,
     X1 = X+10,
     X2 = X+10+64,
@@ -405,7 +405,7 @@ pout_group(ID, X0, Y0) ->
     {_,Y4,W4,_H4} = pout(ID++"_4", X0+XLeft, Y3+YGap),
     Y5 = Y4+YBot,
     H = Y5-Y0,
-    W = XLeft+max(W1,W2)+XRight,
+    W = XLeft+max(W1,max(W2,max(W3,W4)))+XRight,
     group_rectangle(ID,"Pout",X0,Y0,W,H),
     {X0,Y5,W,H}.
 
@@ -664,23 +664,31 @@ send_sdo_rx(CobId, Index, SubInd) ->
     can:send(Frame).
 
 %% reply from node
-sdo_tx(CobID,Bin,State) ->  
+sdo_tx(CobId,Bin,State) ->  
     case Bin of
 	?ma_scs_initiate_download_response(Index,SubInd) ->
-	    io:format("sdo_tx: CobID=~s, SET RESP index=~w, si=~w\n",
-		      [integer_to_list(CobID,16),Index,SubInd]),
+	    io:format("sdo_tx: CobId=~s, SET RESP index=~w, si=~w\n",
+		      [integer_to_list(CobId,16),Index,SubInd]),
 	    {noreply,State};
 
 	?ma_scs_initiate_upload_response(N,E,S,Index,SubInd,Data) when
 	      E =:= 1 ->
 	    Value = sdo_value(S,N,Data),
-	    io:format("sdo_tx: CobID=~s, GET RESP index=~w, si=~w, value=~w\n", 
-		      [integer_to_list(CobID,16),Index,SubInd,Value]),
-	    State1 = set_value_by_cobid(CobID,Index,SubInd,Value,State),
+	    io:format("sdo_tx: CobId=~s, GET RESP index=~w, si=~w, value=~w\n", 
+		      [integer_to_list(CobId,16),Index,SubInd,Value]),
+	    State1 = set_value_by_cobid(CobId,Index,SubInd,Value,State),
 	    {noreply,State1};
+
+	?ma_abort_transfer(Index,_SubInd,Code) ->
+	    if Code =:= ?ABORT_NO_SUCH_OBJECT, Index =:= ?INDEX_BOOT_VSN ->
+		    State1 = set_by_cobid(CobId,status,up,State),
+		    {noreply,State1};
+	       true ->
+		    {noreply,State}
+	    end;
 	_ ->
-	    io:format("sdo_tx: CobID=~s, only  expedited mode supported\n",
-		      [integer_to_list(CobID,16)]),
+	    io:format("sdo_tx: CobId=~s, only  expedited mode supported\n",
+		      [integer_to_list(CobId,16)]),
 	    {noreply,State}
     end.
 
@@ -710,17 +718,23 @@ node_started(_CobId, Serial, State) ->
 
 node_running(_CobId, Serial, State) ->
     io:format("Node ~6.16.0B running\n", [Serial]),
-    %% FIXME: fix boot check
-    Nodes = set_status_by_serial(Serial, up, State#state.nodes),
-    spawn(
-      fun() ->
-	      XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
-	      io:format("XCobId = ~8.16.0B\n", [XCobId]),
-	      send_sdo_rx(XCobId, ?INDEX_ID, 0),
-	      send_sdo_rx(XCobId, ?IX_IDENTITY_OBJECT, ?SI_IDENTITY_PRODUCT)
-	      %% ...
-      end),
-    {noreply, State#state { nodes=Nodes }}.
+    case find_node_by_serial(Serial, State#state.nodes) of
+	false ->
+	    spawn(
+	      fun() ->
+		      XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
+		      io:format("XCobId = ~8.16.0B\n", [XCobId]),
+		      send_sdo_rx(XCobId, ?INDEX_ID, 0),
+		      send_sdo_rx(XCobId, ?IX_IDENTITY_OBJECT,
+				  ?SI_IDENTITY_PRODUCT),
+		      send_sdo_rx(XCobId, ?INDEX_BOOT_VSN, 0)
+		      %% ...
+	      end),
+	    {noreply, State};
+	{value,_Node} ->
+	    %% Node is present in node list
+	    {noreply, State}
+    end.
 
 
 node_message(CobID, Index, Si, Value, State) ->
@@ -791,6 +805,8 @@ set_value_by_cobid(CobId,Index,SubInd,Value,State) ->
 		_ ->
 		    State1
 	    end;
+	?INDEX_BOOT_VSN ->
+	    set_by_cobid(CobId,status,boot,State);
 	_ ->
 	    State
     end.
@@ -868,10 +884,19 @@ take_node_by_id(Id, [Node|Ns], Ms) ->
 take_node_by_id(_Id, [], _Ms) ->
     false.
 
-%% find node with pos
-find_node_by_pos(Pos, [Node=#{ pos := Pos}|Ns]) ->
-    {value,Node};
-find_node_by_pos(Pos, [Node|Ns]) ->
-    find_node_by_pos(Pos, Ns);
-find_node_by_pos(_Id, []) ->
+find_node_by_pos(Pos, Ns) ->
+    find_node_by_key(pos, Pos, Ns).
+
+find_node_by_serial(Serial, Ns) ->
+    find_node_by_key(serial, Serial, Ns).
+
+%% find node with key and Value
+find_node_by_key(Key,Value,[Node|Ns]) ->
+    case Node of
+	#{ Key := Value} ->
+	    {value,Node};
+	_ ->
+	    find_node_by_key(Key,Value,Ns)
+    end;
+find_node_by_key(_Key, _Value, []) ->
     false.
