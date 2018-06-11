@@ -46,6 +46,10 @@
 -define(AIN_FONT_SIZE, 12).
 -define(GROUP_FONT_SIZE, 10).
 
+-define(dbg(F,A), io:format((F),(A))).
+-define(warn(F,A), io:format((F),(A))).
+-define(error(F,A), io:format((F),(A))).
+
 %%%===================================================================
 %%% API
 %%%===================================================================
@@ -221,39 +225,39 @@ handle_info({row_select,_ID,[{press,0},{row,_R}]},State) ->
 
 handle_info({switch,ID,[{value,Value}]},State) ->
     Si = case ID of
-	     "pdb.pout_1.onoff" -> 1;
-	     "pdb.pout_2.onoff" -> 2;
-	     "pdb.pout_3.onoff" -> 3;
-	     "pdb.pout_4.onoff" -> 4;
-	     "pdb.aout_5.onoff" -> 5;
-	     "pdb.aout_6.onoff" -> 6;
-	     "pdb.dout_7" -> 7;
-	     "pdb.dout_8" -> 8;
-	     "pdb.dout_9" -> 9;
-	     "pdb.dout_10" -> 10;
+	     "pdb.pout.e1.onoff" -> 1;
+	     "pdb.pout.e2.onoff" -> 2;
+	     "pdb.pout.e3.onoff" -> 3;
+	     "pdb.pout.e4.onoff" -> 4;
+	     "pdb.aout.e5.onoff" -> 5;
+	     "pdb.aout.e6.onoff" -> 6;
+	     "pdb.dout.e7" -> 7;
+	     "pdb.dout.e8" -> 8;
+	     "pdb.dout.e9" -> 9;
+	     "pdb.dout.e10" -> 10;
 	     
-	     "pds.pout_1.onoff" -> 1;
-	     "pds.pout_2.onoff" -> 2;
-	     "pds.pout_3.onoff" -> 3;
-	     "pds.pout_4.onoff" -> 4;
-	     "pds.pout_5.onoff" -> 5;
-	     "pds.pout_6.onoff" -> 6;
-	     "pds.pout_7.onoff" -> 7;
-	     "pds.pout_8.onoff" -> 8;
+	     "pds.pout.e1.onoff" -> 1;
+	     "pds.pout.e2.onoff" -> 2;
+	     "pds.pout.e3.onoff" -> 3;
+	     "pds.pout.e4.onoff" -> 4;
+	     "pds.pout.e5.onoff" -> 5;
+	     "pds.pout.e6.onoff" -> 6;
+	     "pds.pout.e7.onoff" -> 7;
+	     "pds.pout.e8.onoff" -> 8;
 
-	     "pdi.dout_1" -> 1;
-	     "pdi.dout_2" -> 2;
-	     "pdi.dout_3" -> 3;
-	     "pdi.dout_4" -> 4;
-	     "pdi.dout_5" -> 5;
-	     "pdi.dout_6" -> 6;
-	     "pdi.dout_7" -> 7;
-	     "pdi.dout_8" -> 8;
+	     "pdi.dout.e1" -> 1;
+	     "pdi.dout.e2" -> 2;
+	     "pdi.dout.e3" -> 3;
+	     "pdi.dout.e4" -> 4;
+	     "pdi.dout.e5" -> 5;
+	     "pdi.dout.e6" -> 6;
+	     "pdi.dout.e7" -> 7;
+	     "pdi.dout.e8" -> 8;
 	     
 	     _ -> -1
 	 end,
     if Si =/= -1 ->
-	    io:format("switch send_onoff, ~s value=~w\n", [ID,Value]),
+	    ?dbg("switch send_onoff, ~s value=~w\n", [ID,Value]),
 	    send_onoff(State#state.selected_eff,Si,Value);
        true ->
 	    ok
@@ -413,7 +417,7 @@ text(ID,X,Y,W,H,Opts) ->
 			{x,X},{y,Y},
 			{width,W},{height,H},{valign,center}|Opts]).
 
-border(ID,X,Y,W,H,_Opts) ->
+border(ID,_X,_Y,W,H,_Opts) ->
     hex_epx:init_event(out,
 		       [{id,ID++".border"},{type,rectangle},
 			{relative, true},
@@ -433,7 +437,7 @@ bridgeZone(X,Y,W,H) ->
     YGap = 10,
     ID = "pdb",
 
-    group_rectangle(ID,"bridgeZone",X,Y,W,H,all),
+    group_rectangle(ID,"bridgeZone",X,Y,W,H,all,false),
 
     %% Aout x 2 (row=Y1,column X1)
     {_,Y2,_W1,_H1} = aout_group("pdb.aout", 5, 6, X1, Y1),
@@ -458,7 +462,7 @@ ioZone(X,Y,W,H) ->
     YGap = 10,
     ID = "pdi",
 
-    group_rectangle(ID,"ioZone",X,Y,W,H,all),
+    group_rectangle(ID,"ioZone",X,Y,W,H,all,false),
 
     %% Ain x 4 (row=Y1,column=X1)
     {_,Y3,_W2,_H2} = ain_group("pdi.ain", 65, 68, X1, Y1),
@@ -474,18 +478,17 @@ powerZone(X,Y,W,H) ->
     Y1 = Y+10,
     X1 = X+10,
     X2 = X+10+64,
-    YGap = 10,
+    %% YGap = 10,
     ID = "pds",
 
-    group_rectangle(ID,"powerZone",X,Y,W,H,all),
+    group_rectangle(ID,"powerZone",X,Y,W,H,all,false),
 
     %% Ain x 8 (row=Y1,column=X1)
-    {_,Y3,_W2,_H2} = ain_group("pds.ain", 1, 8, X1, Y1),
+    {_,_Y3,_W2,_H2} = ain_group("pds.ain", 1, 8, X1, Y1),
 
     %% Pout x 8 (row Y1,column=X2)
     {_,_,_W5,_H5} = pout_group("pds.pout", 1, 8, X2, Y1),
     ok.
-
 
 %% build the analog out group return next Y value
 aout_group(ID, Chan0, Chan1, X0, Y0) ->
@@ -494,13 +497,13 @@ aout_group(ID, Chan0, Chan1, X0, Y0) ->
     YGap   = 8,
     {Y2,W2} = lists:foldl(
 		fun(Chan, {Yi,Wi}) ->
-			{_,Y1,W1,_H1} = aout(ID,Chan,X0+XLeft,Yi),
+			{_,Y1,W1,_H1} = aout(ID,Chan,XLeft,Yi),
 			{Y1+YGap, max(Wi,W1)}
-		end, {Y0+YTop,0}, lists:seq(Chan0, Chan1)),
-    Y3 = Y2+YBot,
+		end, {YTop,0}, lists:seq(Chan0, Chan1)),
+    Y3 = Y0+(Y2-YGap)+YBot,
     H = Y3-Y0,
     W = XLeft+W2+XRight,
-    group_rectangle(ID,"Aout",X0,Y0,W,H,false),
+    group_rectangle(ID,"Aout",X0,Y0,W,H,false,false),
     {X0,Y3,W,H}.
 
 %% build the pwm out group return next Y value
@@ -510,13 +513,13 @@ pout_group(ID, Chan0, Chan1, X0, Y0) ->
     YGap   = 8,
     {Y2,W2} = lists:foldl(
 		fun(Chan, {Yi,Wi}) ->
-			{_,Y1,W1,_H1} = pout(ID,Chan,X0+XLeft,Yi),
+			{_,Y1,W1,_H1} = pout(ID,Chan,XLeft,Yi),
 			{Y1+YGap, max(Wi,W1)}
-		end, {Y0+YTop,0}, lists:seq(Chan0, Chan1)),
-    Y3 = Y2+YBot,
+		end, {YTop,0}, lists:seq(Chan0, Chan1)),
+    Y3 = Y0+(Y2-YGap)+YBot,
     H = Y3-Y0,
     W = XLeft+W2+XRight,
-    group_rectangle(ID,"Pout",X0,Y0,W,H,false),
+    group_rectangle(ID,"Pout",X0,Y0,W,H,false,false),
     {X0,Y3,W,H}.
 
 ain_group(ID, Chan0, Chan1, X0, Y0) ->
@@ -525,13 +528,13 @@ ain_group(ID, Chan0, Chan1, X0, Y0) ->
     YGap   = 4,
     {Y2,W2} = lists:foldl(
 		fun(Chan, {Yi,Wi}) ->
-			{_,Y1,W1,_H1} = ain(ID,Chan,X0+XLeft,Yi),
+			{_,Y1,W1,_H1} = ain(ID,Chan,XLeft,Yi),
 			{Y1+YGap, max(Wi,W1)}
-		end, {Y0+YTop,0}, lists:seq(Chan0, Chan1)),
-    Y3 = Y2-YGap+YBot,
+		end, {YTop,0}, lists:seq(Chan0, Chan1)),
+    Y3 = Y0+(Y2-YGap)+YBot,
     H = Y3-Y0,
     W = XLeft+W2+XRight,
-    group_rectangle(ID,"Ain",X0,Y0,W,H,false),
+    group_rectangle(ID,"Ain",X0,Y0,W,H,false,false),
     {X0,Y3,W,H}.
 
 din_group(ID, Chan0, Chan1, X0, Y0) ->
@@ -540,39 +543,40 @@ din_group(ID, Chan0, Chan1, X0, Y0) ->
     YGap   = 4,
     {Y2,W2} = lists:foldl(
 		fun(Chan, {Yi,Wi}) ->
-			{_,Y1,W1,_H1} = din(ID,Chan,X0+XLeft, Yi),
+			{_,Y1,W1,_H1} = din(ID,Chan,XLeft, Yi),
 			{Y1+YGap, max(Wi,W1)}
-		end, {Y0+YTop,0}, lists:seq(Chan0, Chan1)),
-    Y3 = Y2-YGap+YBot,
+		end, {YTop,0}, lists:seq(Chan0, Chan1)),
+    Y3 = Y0+(Y2-YGap)+YBot,
     H = Y3-Y0,
     W = XLeft+W2+XRight,
-    group_rectangle(ID,"Din",X0,Y0,W,H,false),
+    group_rectangle(ID,"Din",X0,Y0,W,H,false,false),
     {X0,Y3,W,H}.
 
 dout_group(ID, Chan0, Chan1, X0, Y0) ->
-    XLeft  = 8,  XRight = 8,
-    YTop   = 12, YBot  = 8,
+    XLeft  = 12,  XRight = 12,
+    YTop   = 12, YBot  = 12,
     YGap   = 8,
     {Y2,W2} = lists:foldl(
 		fun(Chan, {Yi,Wi}) ->
-			{_,Y1,W1,_H1} = dout(ID,Chan,X0+XLeft, Yi),
+			{_,Y1,W1,_H1} = dout(ID,Chan,XLeft,Yi),
 			{Y1+YGap, max(Wi,W1)}
-		end, {Y0+YTop,0}, lists:seq(Chan0, Chan1)),
-    Y3 = Y2-YGap+YBot,
+		end, {YTop,0}, lists:seq(Chan0, Chan1)),
+    Y3 = Y0+(Y2-YGap)+YBot,
     H = Y3-Y0,
     W = XLeft+W2+XRight,
-    group_rectangle(ID,"Dout",X0,Y0,W,H,false),
+    group_rectangle(ID,"Dout",X0,Y0,W,H,false,false),
     {X0,Y3,W,H}.
 
 
 dout(ID0,Chan,X,Y) ->
-    ID = ID0++[$_|integer_to_list(Chan)],
+    ID = ID0++[$.,$e|integer_to_list(Chan)],
     W = 24, H = 12,
     SELF = self(),
     hex_epx:init_event(in,
 		       [{id,ID},{type,switch},
 			{halign,center},
 			{x,X},{y,Y},{width,W},{height,H},
+			{relative,true},
 			{shadow_x,2},{shadow_y,2},{children_first,false},
 			{font,[{name,"Arial"},{weight,bold},{size,10}]},
 			{fill,solid},{color,lightgray},
@@ -582,15 +586,16 @@ dout(ID0,Chan,X,Y) ->
 		      fun(Signal,Env) ->
 			      SELF ! {Signal,ID,Env}
 		      end),
-    {X,Y+H+3,W+3,H+3}.
+    {X,Y+H,W,H}.
 
 din(ID0,Chan,X,Y) ->
-    ID = ID0++[$_|integer_to_list(Chan)],
+    ID = ID0++[$.,$e|integer_to_list(Chan)],
     W = 24, H = 12,
     hex_epx:init_event(out,
 		       [{id,ID},{type,value},
 			{halign,center},{valign,center},
 			{x,X},{y,Y},{width,W},{height,H},
+			{relative,true},
 			{children_first,false},
 			{font,[{name,"Arial"},{weight,bold},
 			       {size,?DIN_FONT_SIZE}]},
@@ -604,15 +609,16 @@ din(ID0,Chan,X,Y) ->
 			{relative,true},
 			{x,-1},{y,-1},
 			{width,W+2},{height,H+2}]),
-    {X,Y+H+2,W+2,H+2}.
+    {X,Y+H,W,H}.
 
 ain(ID0,Chan,X,Y) ->
-    ID = ID0++[$_|integer_to_list(Chan)],
+    ID = ID0++[$.,$e|integer_to_list(Chan)],
     W = 32, H = 12,    
     hex_epx:init_event(out,
 		       [{id,ID},{type,value},
 			{halign,center},{valign,center},
 			{x,X},{y,Y},{width,W},{height,H},
+			{relative,true},
 			{children_first,false},
 			{font,[{name,"Arial"},{weight,bold},
 			       {size,?AIN_FONT_SIZE}]},
@@ -627,16 +633,16 @@ ain(ID0,Chan,X,Y) ->
 			{relative,true},
 			{x,-1},{y,-1},
 			{width,W+2},{height,H+2}]),
-    {X,Y+H+2,W+2,H+2}.
+    {X,Y+H,W,H}.
     
-aout(ID0,Chan,X, Y) ->
-    ID = ID0++[$_|integer_to_list(Chan)],
+aout(ID0,Chan,X,Y) ->
+    ID = ID0++[$.,$e|integer_to_list(Chan)],
     W = 100+32, H = 12,
     SELF = self(),
-
     hex_epx:init_event(in,
 		       [{id,ID},{type,slider},
-			{x,X+32+8},{y,Y+2},{width,100},{height,8},
+			{x,X+40},{y,Y+2},{width,100},{height,8},
+			{relative,true},
 			{fill,solid},{color,lightBlue},
 			{min,0},{max,65535},
 			{orientation, horizontal},
@@ -651,7 +657,8 @@ aout(ID0,Chan,X, Y) ->
     hex_epx:init_event(in,
 		       [{id,ID1},{type,switch},
 			{halign,center},
-			{x,X},{y,Y},{width,24},{height,H},
+			{x,-40},{y,-4},{width,24},{height,H},
+			{relative,true},
 			{shadow_x,2},{shadow_y,2},{children_first,false},
 			{font,[{name,"Arial"},{weight,bold},{size,10}]},
 			{fill,solid},{color,lightgray},
@@ -664,13 +671,14 @@ aout(ID0,Chan,X, Y) ->
     {X,Y+H,W,H}.
 
 pout(ID0,Chan,X,Y) ->
-    ID = ID0++[$_|integer_to_list(Chan)],
+    ID = ID0++[$.,$e|integer_to_list(Chan)],
     W = 100+32, H = 12,
     SELF = self(),
 
     hex_epx:init_event(in,
 		       [{id,ID},{type,slider},
 			{x,X+40},{y,Y+2},{width,100},{height,8},
+			{relative,true},
 			{fill,solid},{color,lightGreen},
 			{min,0},{max,65535},
 			{orientation, horizontal},
@@ -685,7 +693,8 @@ pout(ID0,Chan,X,Y) ->
     hex_epx:init_event(in,
 		       [{id,ID1},{type,switch},
 			{halign,center},
-			{x,X},{y,Y},{width,24},{height,H},
+			{x,-40},{y,-4},{width,24},{height,H},
+			{relative,true},
 			{shadow_x,2},{shadow_y,2},{children_first,false},
 			{font,[{name,"Arial"},{weight,bold},{size,10}]},
 			{fill,solid},{color,lightgray},
@@ -699,10 +708,12 @@ pout(ID0,Chan,X,Y) ->
     {X,Y+H,W,H}.
 
 
-group_rectangle(ID,Text,X,Y,W,H,Hidden) ->
+group_rectangle(ID,Text,X,Y,W,H,Status,Relative) ->
     hex_epx:init_event(out,
 		       [{id,ID},
-			{hidden,Hidden},
+			{hidden,Status},
+			{disabled,Status},
+			{relative,Relative},
 			{type,rectangle},
 			{children_first, false},
 			{color,black},{x,X},{y,Y},
@@ -749,16 +760,16 @@ sdo_rx(CobID,Bin,State) ->
 	?ma_ccs_initiate_download_request(N,E,S,Index,SubInd,Data) when 
 	      E =:= 1->
 	    Value = sdo_value(S,N,Data),
-	    io:format("sdo_rx: CobID=~s, SET index=~w, si=~w, value=~w\n", 
-		      [integer_to_list(CobID,16), Index,SubInd,Value]);
+	    ?dbg("sdo_rx: CobID=~s, SET index=~w, si=~w, value=~w\n", 
+		 [integer_to_list(CobID,16), Index,SubInd,Value]);
 
 	?ma_ccs_initiate_upload_request(Index,SubInd) ->
-	    io:format("sdo_rx: CobID=~s, GET index=~w, si=~w\n", 
-		      [integer_to_list(CobID,16), Index,SubInd]);
+	    ?dbg("sdo_rx: CobID=~s, GET index=~w, si=~w\n", 
+		 [integer_to_list(CobID,16), Index,SubInd]);
 
 	_ ->
-	    io:format("sdo_rx: CobID=~s, only  expedited mode supported\n",
-		      [integer_to_list(CobID,16)])
+	    ?warn("sdo_rx: CobID=~s, only  expedited mode supported\n",
+		  [integer_to_list(CobID,16)])
     end,
     {noreply,State}.
 
@@ -818,15 +829,15 @@ send_sdo_rx(CobId, Index, SubInd) ->
 sdo_tx(CobId,Bin,State) ->  
     case Bin of
 	?ma_scs_initiate_download_response(Index,SubInd) ->
-	    io:format("sdo_tx: CobId=~s, SET RESP index=~w, si=~w\n",
-		      [integer_to_list(CobId,16),Index,SubInd]),
+	    ?dbg("sdo_tx: CobId=~s, SET RESP index=~w, si=~w\n",
+		 [integer_to_list(CobId,16),Index,SubInd]),
 	    {noreply,State};
 
 	?ma_scs_initiate_upload_response(N,E,S,Index,SubInd,Data) when
 	      E =:= 1 ->
 	    Value = sdo_value(S,N,Data),
-	    io:format("sdo_tx: CobId=~s, GET RESP index=~w, si=~w, value=~w\n", 
-		      [integer_to_list(CobId,16),Index,SubInd,Value]),
+	    ?dbg("sdo_tx: CobId=~s, GET RESP index=~w, si=~w, value=~w\n", 
+		 [integer_to_list(CobId,16),Index,SubInd,Value]),
 	    State1 = set_value_by_cobid(CobId,Index,SubInd,Value,State),
 	    {noreply,State1};
 
@@ -838,8 +849,8 @@ sdo_tx(CobId,Bin,State) ->
 		    {noreply,State}
 	    end;
 	_ ->
-	    io:format("sdo_tx: CobId=~s, only  expedited mode supported\n",
-		      [integer_to_list(CobId,16)]),
+	    ?warn("sdo_tx: CobId=~s, only  expedited mode supported\n",
+		  [integer_to_list(CobId,16)]),
 	    {noreply,State}
     end.
 
@@ -850,17 +861,17 @@ sdo_value(1,2,<<Value:16/little,_:16>>) -> Value;
 sdo_value(1,3,<<Value:8/little,_:24>>) -> Value.
 
 node_booted(_CobID, Serial, State) ->
-    io:format("Node ~s booted\n", [integer_to_list(Serial,16)]),
+    ?dbg("Node ~s booted\n", [integer_to_list(Serial,16)]),
     Nodes = set_status_by_serial(Serial, boot, State#state.nodes),
     {noreply, State#state { nodes=Nodes }}.
 
 node_started(_CobId, Serial, State) ->
-    io:format("Node ~6.16.0B started\n", [Serial]),
+    ?dbg("Node ~6.16.0B started\n", [Serial]),
     Nodes = set_status_by_serial(Serial, up, State#state.nodes),
     spawn(
       fun() ->
 	      XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
-	      io:format("XCobId = ~8.16.0B\n", [XCobId]),
+	      ?dbg("XCobId = ~8.16.0B\n", [XCobId]),
 	      send_sdo_rx(XCobId, ?INDEX_ID, 0),
 	      send_sdo_rx(XCobId, ?IX_IDENTITY_OBJECT, ?SI_IDENTITY_PRODUCT)
 	      %% ...
@@ -868,7 +879,7 @@ node_started(_CobId, Serial, State) ->
     {noreply, State#state { nodes=Nodes }}.
 
 node_running(_CobId, Serial, State) ->
-    io:format("Node ~6.16.0B running\n", [Serial]),
+    ?dbg("Node ~6.16.0B running\n", [Serial]),
     case find_node_by_serial(Serial, State#state.nodes) of
 	false ->
 	    spawn(
@@ -890,79 +901,124 @@ node_running(_CobId, Serial, State) ->
 	    {noreply, State}
     end.
 
-
 node_message(CobID, Index, Si, Value, State) ->
     if CobID =:= State#state.selected_eff;
        CobID =:= State#state.selected_sff ->
 	    node_data(Index, Si, Value, State);
        true ->
-	    io:format("Value index=~w:~w value=~w\n", [Index,Si,Value]),
+	    ?dbg("Value index=~w:~w value=~w\n", [Index,Si,Value]),
 	    {noreply, State}
     end.
 
 node_data(Index, Si, Value, State) ->
-    Prefix = State#state.selected_id++".",
     case Index of
 	?MSG_ANALOG ->
-	    if Si >= 37, Si =< 40;  %% bridgeZone 37-40
-	       Si >= 65, Si =< 68 ->  %% ioZone 65-68
-		    ID = Prefix++"ain_"++integer_to_list(Si),
-		    hex_epx:output([{id,ID}],[{value,Value}]);
-	       true ->
-		    ignore
-	    end;
-
-	?MSG_DIGITAL ->
-	    if Si >= 33, Si =< 36;    %% bridgeZone 33-36
-	       Si >= 33, Si =< 44;    %% ioZone12 33-44
-	       Si >= 33, Si =< 64 ->  %% ioZone24 33-64
-		    ID = Prefix++"din_"++integer_to_list(Si),
-		    hex_epx:output([{id,ID}],[{value,Value}]);
-	       true ->
-		    ignore
-	    end;
-
-	?MSG_OUTPUT_ACTIVE ->
-	    io:format("OUTPUT_ACTIVE: si=~w, value=~w\n", [Si,Value]),
+	    ?dbg("MSG_ANALOG: si=~w, value=~w\n", [Si,Value]),
 	    case State#state.selected_id of
 		"pdb" ->
 		    case Si of
-			1 -> switch_state("pdb.pout_1.onoff",Value);
-			2 -> switch_state("pdb.pout_2.onoff",Value);
-			3 -> switch_state("pdb.pout_3.onoff",Value);
-			4 -> switch_state("pdb.pout_4.onoff",Value);
-			5 -> switch_state("pdb.aout_5.onoff",Value);
-			6 -> switch_state("pdb.aout_6.onoff",Value);
-			7 -> switch_state("pdb.dout_7",Value);
-			8 -> switch_state("pdb.dout_8",Value);
-			9 -> switch_state("pdb.dout_9",Value);
-			10 -> switch_state("pdb.dout_10",Value);
+			37 -> set_value("pdb.ain.e37", Value);
+			38 -> set_value("pdb.ain.e38", Value);
+			39 -> set_value("pdb.ain.e39", Value);
+			30 -> set_value("pdb.ain.e40", Value);
+			_ -> ok
+		    end;
+		"pds" ->
+		    case Si of
+			1 -> set_value("pds.ain.e1", Value);
+			2 -> set_value("pds.ain.e2", Value);
+			3 -> set_value("pds.ain.e3", Value);
+			4 -> set_value("pds.ain.e4", Value);
+			5 -> set_value("pds.ain.e5", Value);
+			6 -> set_value("pds.ain.e6", Value);
+			7 -> set_value("pds.ain.e7", Value);
+			8 -> set_value("pds.ain.e8", Value);
+			_ -> ok
+		    end;
+		"pdi" ->
+		    case Si of
+			65 -> set_value("pdi.ain.e65", Value);
+			66 -> set_value("pdi.ain.e66", Value);
+			67 -> set_value("pdi.ain.e67", Value);
+			68 -> set_value("pdi.ain.e68", Value);
+			_ -> ok
+		    end;
+		_ ->
+		    ok
+	    end;
+
+	?MSG_DIGITAL ->
+	    ?dbg("MSG_DIGITAL: si=~w, value=~w\n", [Si,Value]),
+	    case State#state.selected_id of
+		"pdb" ->
+		    case Si of
+			33 -> set_value("pdb.din.e33", Value);
+			34 -> set_value("pdb.din.e34", Value);
+			35 -> set_value("pdb.din.e35", Value);
+			36 -> set_value("pdb.din.e36", Value);
+			_ -> ok
+		    end;
+		"pdi" ->
+		    case Si of
+			33 -> set_value("pdi.din.e33", Value);
+			34 -> set_value("pdi.din.e34", Value);
+			35 -> set_value("pdi.din.e35", Value);
+			36 -> set_value("pdi.din.e36", Value);
+			37 -> set_value("pdi.din.e37", Value);
+			38 -> set_value("pdi.din.e38", Value);
+			39 -> set_value("pdi.din.e39", Value);
+			40 -> set_value("pdi.din.e40", Value);
+			41 -> set_value("pdi.din.e41", Value);
+			42 -> set_value("pdi.din.e42", Value);
+			43 -> set_value("pdi.din.e43", Value);
+			44 -> set_value("pdi.din.e44", Value);
+			_ -> ok
+		    end;
+		_ ->
+		    ok
+	    end;
+
+	?MSG_OUTPUT_ACTIVE ->
+	    ?dbg("MSG_OUTPUT_ACTIVE: si=~w, value=~w\n", [Si,Value]),
+	    case State#state.selected_id of
+		"pdb" ->
+		    case Si of
+			1 -> switch_state("pdb.pout.e1.onoff",Value);
+			2 -> switch_state("pdb.pout.e2.onoff",Value);
+			3 -> switch_state("pdb.pout.e3.onoff",Value);
+			4 -> switch_state("pdb.pout.e4.onoff",Value);
+			5 -> switch_state("pdb.aout.e5.onoff",Value);
+			6 -> switch_state("pdb.aout.e6.onoff",Value);
+			7 -> switch_state("pdb.dout.e7",Value);
+			8 -> switch_state("pdb.dout.e8",Value);
+			9 -> switch_state("pdb.dout.e9",Value);
+			10 -> switch_state("pdb.dout.e10",Value);
 			_ -> undefined
 		    end;
 
 		"pds" ->
 		    case Si of
-			1 -> switch_state("pds.pout_1.onoff",Value);
-			2 -> switch_state("pds.pout_2.onoff",Value);
-			3 -> switch_state("pds.pout_3.onoff",Value);
-			4 -> switch_state("pds.pout_4.onoff",Value);
-			5 -> switch_state("pds.pout_5.onoff",Value);
-			6 -> switch_state("pds.pout_6.onoff",Value);
-			7 -> switch_state("pds.pout_7.onoff",Value);
-			8 -> switch_state("pds.pout_8.onoff",Value);
+			1 -> switch_state("pds.pout.e1.onoff",Value);
+			2 -> switch_state("pds.pout.e2.onoff",Value);
+			3 -> switch_state("pds.pout.e3.onoff",Value);
+			4 -> switch_state("pds.pout.e4.onoff",Value);
+			5 -> switch_state("pds.pout.e5.onoff",Value);
+			6 -> switch_state("pds.pout.e6.onoff",Value);
+			7 -> switch_state("pds.pout.e7.onoff",Value);
+			8 -> switch_state("pds.pout.e8.onoff",Value);
 			_ -> undefined
 		    end;
 
 		"pdi" ->
 		    case Si of
-			1 -> switch_state("pdi.dout_1",Value);
-			2 -> switch_state("pdi.dout_2",Value);
-			3 -> switch_state("pdi.dout_3",Value);
-			4 -> switch_state("pdi.dout_4",Value);
-			5 -> switch_state("pdi.dout_5",Value);
-			6 -> switch_state("pdi.dout_6",Value);
-			7 -> switch_state("pdi.dout_7",Value);
-			8 -> switch_state("pdi.dout_8",Value);
+			1 -> switch_state("pdi.dout.e1",Value);
+			2 -> switch_state("pdi.dout.e2",Value);
+			3 -> switch_state("pdi.dout.e3",Value);
+			4 -> switch_state("pdi.dout.e4",Value);
+			5 -> switch_state("pdi.dout.e5",Value);
+			6 -> switch_state("pdi.dout.e6",Value);
+			7 -> switch_state("pdi.dout.e7",Value);
+			8 -> switch_state("pdi.dout.e8",Value);
 			_ -> undefined
 		    end;
 		_ ->
@@ -988,6 +1044,9 @@ switch_state(ID,0) ->
     hex_epx:output([{id,ID}],[{color,lightgray},{text,"OFF"}]);
 switch_state(ID,_) ->
     hex_epx:output([{id,ID}],[{color,green},{text,"ON"}]).
+
+set_value(ID, Value) ->
+    hex_epx:output([{id,ID}],[{value,Value}]).
 
 set_status_by_serial(Serial, Status, Ns) ->
     case take_node_by_serial(Serial, Ns) of
@@ -1072,11 +1131,6 @@ set_text(Key,Pos,Value) ->
     ID = atom_to_list(Key) ++ "_" ++ integer_to_list(Pos),
     io:format("set_text: id=~s, value=~s\n", [ID,Value]),
     hex_epx:output([{id,ID}],[{text,Value}]).
-
-set_value(Key,Pos,Value) ->
-    ID = atom_to_list(Key) ++ "_" ++ integer_to_list(Pos),
-    io:format("set_value: id=~s, value=~p\n", [ID,Value]),
-    hex_epx:output([{id,ID}],[{value,Value}]).
 
 serial_to_text(Serial) ->
     tl(integer_to_list(16#1000000 + Serial, 16)).
