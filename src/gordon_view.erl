@@ -36,8 +36,15 @@
 	  selected,        %% Selected node
 	  selected_eff=0,  %% Selected node
 	  selected_sff=0,  %% Selected node
+	  selected_id,     %% "pds"/"pdb"/"pdi"/"pdc"
 	  nodes = [] %% list of node maps
 	}).
+
+-define(TEXT_CELL_FONT_SIZE, 14).
+-define(DIN_FONT_SIZE, 12).
+-define(DOUT_FONT_SIZE, 12).
+-define(AIN_FONT_SIZE, 12).
+-define(GROUP_FONT_SIZE, 10).
 
 %%%===================================================================
 %%% API
@@ -98,11 +105,11 @@ init(Options) ->
 			      SELF ! {event,Signal,Env}
 		      end),
 
-    Width  = proplists:get_value(width, Options, 640),
+    Width  = proplists:get_value(width, Options, 800),
     Height = proplists:get_value(height, Options, 480),
-    node_table(Width, Height),
+    node_table(Width div 2, Height),
 
-    control_demo(Width div 2, 10, Width, Height),
+    control_demo(Width div 2, 10, Width div 2, Height),
 
     can_router:attach(),
 
@@ -187,13 +194,24 @@ handle_info({row_select,_ID,[{press,1},{row,R}]},State) ->
 		      0 -> 0;
 		      M -> ?COB_ID(?PDO1_TX,M)
 		  end,
+	    PDx = case maps:get(product,Node,undefined) of
+		      undefined -> undefined;
+		      powerZone -> "pds";
+		      ioZone -> "pdi";
+		      bridgeZone -> "pdb";
+		      controlZone -> "pdc";
+		      _ -> undefined
+		  end,
 	    io:format("deselect row=~w\n", [State#state.selected]),
 	    State1 = deselect_row(State#state.selected,State),
 	    State2 = State1#state { selected = Node, 
 				    selected_eff = EFF,
-				    selected_sff = SFF },
-	    io:format("select row=~w, eff=~8.16.0B, sff=~3.16.0B\n",
-		      [R, EFF, SFF]),
+				    selected_sff = SFF,
+				    selected_id  = PDx
+				  },
+	    hex_epx:output([{id,PDx}],[{hidden,false}]),
+	    io:format("select row=~w, eff=~8.16.0B, sff=~3.16.0B id=~s\n",
+		      [R, EFF, SFF, PDx]),
 	    {noreply, State2}
     end;
 handle_info({row_select,_ID,[{press,0},{row,_R}]},State) ->
@@ -203,10 +221,10 @@ handle_info({row_select,_ID,[{press,0},{row,_R}]},State) ->
 
 handle_info({switch,Label,[{value,Value}]},State) ->
     SubInd = case Label of
-		 "dout_7" -> 7;
-		 "dout_8" -> 8;
-		 "dout_9" -> 9;
-		 "dout_10" -> 10;
+		 [_,_,_|".dout_7"] -> 7;
+		 [_,_,_|".dout_8"] -> 8;
+		 [_,_,_|".dout_9"] -> 9;
+		 [_,_,_|".dout_10"] -> 10;
 		 _ -> -1
 	     end,
     case Value of
@@ -254,7 +272,11 @@ code_change(_OldVsn, State, _Extra) ->
 deselect_row(undefined, State) ->
     State;
 deselect_row(_Row, State) ->
-    State#state { selected=undefined }.
+    case State#state.selected_id of
+       undefined -> ok;
+       ID -> hex_epx:output([{id,ID}],[{hidden,all}])
+    end,
+    State#state { selected=undefined, selected_id=undefined }.
 
 %% Node table
 %% +------+---+----------+---+--------+
@@ -264,11 +286,7 @@ deselect_row(_Row, State) ->
 %% +------+---+----------+---+--------+
 
 node_table(W,_H) ->
-    text("dummy", 0, 0, 10, 10, [{text,""}]),
-    {ok,[{font,Font}]} = hex_epx:get_event("dummy", [font]),
-    epx_gc:set_font(Font),
-    {TxW0,TxH} = epx_font:dimension(epx_gc:current(), "Wy"),
-    TxW = TxW0 div 2,
+    {TxW,TxH} = text_cell_dimension(),
     XOffs = 8,
     YOffs = 8,
     NRows = 16,
@@ -353,78 +371,99 @@ row(I,XOffs,YOffs,TxW,TxH,_W) ->
 	      [{text,""},{halign,center}]),
     X4 + W4 + 1.
 
-
 text_cell(ID, X, Y, W, H, Opts) ->
     text(ID, X, Y, W, H, Opts),
     border(ID, X, Y, W, H, Opts).
 
+text_cell_dimension() ->
+    text("dummy", 0, 0, 10, 10, [{text,""}]),
+    {ok,[{font,Font}]} = hex_epx:get_event("dummy", [font]),
+    epx_gc:set_font(Font),
+    {TxW0,TxH} = epx_font:dimension(epx_gc:current(), "Wy"),
+    TxW = TxW0 div 2,
+    {TxW,TxH}.
+
 text(ID,X,Y,W,H,Opts) ->
     hex_epx:init_event(out,
 		       [{id,ID},{type,text},
-			{font,[{name,"Arial"},{slant,roman},{size,12}]},
+			{font,[{name,"Arial"},{slant,roman},{weight,bold},
+			       {size,?TEXT_CELL_FONT_SIZE}]},
 			{x,X},{y,Y},
 			{width,W},{height,H},{valign,center}|Opts]).
 
 border(ID,X,Y,W,H,_Opts) ->
     hex_epx:init_event(out,
 		       [{id,ID++".border"},{type,rectangle},
-			{color,black},{x,X},{y,Y},{width,W+1},{height,H+1}]).
+			{relative, true},
+			{color,black},{x,-1},{y,-1},{width,W+2},{height,H+2}]).
 
 %% draw various "widgets"
 control_demo(X, Y, W, H) ->
-    bridgeZone(X,Y,W,H).
+    bridgeZone(X,Y,W,H),
+    ioZone(X,Y,W,H),
+    powerZone(X,Y,W,H).
 
 %% bridgeZone layout
-bridgeZone(X,Y,_W,_H) ->
+bridgeZone(X,Y,W,H) ->
     Y1 = Y+10,
     X1 = X+10,
     X2 = X+10+64,
     YGap = 10,
+    ID = "pdb",
+
+    group_rectangle(ID,"bridgeZone",X,Y,W,H,all),
 
     %% Aout x 2 (row=Y1,column X1)
-    {_,Y2,_W1,_H1} = aout_group("aout", 5, 6, X1, Y1),
+    {_,Y2,_W1,_H1} = aout_group("pdb.aout", 5, 6, X1, Y1),
 
     %% Ain x 4 (row=Y2,column=X1)
-    {_,Y3,_W2,_H2} = ain_group("ain", 37, 40, X1, Y2+YGap),
+    {_,Y3,_W2,_H2} = ain_group("pdb.ain", 37, 40, X1, Y2+YGap),
 
     %% Din x 4 (row Y3,column=X1)
-    {_,_,_W3,_H3} = din_group("din", 33, 36, X1, Y3+YGap),
+    {_,_,_W3,_H3} = din_group("pdb.din", 33, 36, X1, Y3+YGap),
 
     %% Pout x 4 (row=Y2,column=X2)
-    {_,Y4,_W4,_H4} = pout_group("pout", 1, 4, X2, Y2+YGap),
+    {_,Y4,_W4,_H4} = pout_group("pdb.pout", 1, 4, X2, Y2+YGap),
 
     %% Dout x 4 (row Y3,column=X2)
-    {_,_,_W5,_H5} = dout_group("dout", 7, 10, X2, Y4+YGap),
+    {_,_,_W5,_H5} = dout_group("pdb.dout", 7, 10, X2, Y4+YGap),
     ok.
 
-ioZone(X,Y,_W,_H) ->
+ioZone(X,Y,W,H) ->
     Y1 = Y+10,
     X1 = X+10,
     X2 = X+10+64,
     YGap = 10,
+    ID = "pdi",
+
+    group_rectangle(ID,"ioZone",X,Y,W,H,all),
 
     %% Ain x 4 (row=Y1,column=X1)
-    {_,Y3,_W2,_H2} = ain_group("ain", 65, 68, X1, Y1),
+    {_,Y3,_W2,_H2} = ain_group("pdi.ain", 65, 68, X1, Y1),
 
     %% Din x 12 (row Y3,column=X1) support iozone24?
-    {_,_,_W3,_H3} = din_group("din", 33, 44, X1, Y3+YGap),
+    {_,_,_W3,_H3} = din_group("pdi.din", 33, 44, X1, Y3+YGap),
 
     %% Dout x 8 (row Y3,column=X2)
-    {_,_,_W5,_H5} = dout_group("dout", 1, 8, X2, Y1),
+    {_,_,_W5,_H5} = dout_group("pdi.dout", 1, 8, X2, Y1),
     ok.
 
-powerZone(X,Y,_W,_H) ->
+powerZone(X,Y,W,H) ->
     Y1 = Y+10,
     X1 = X+10,
     X2 = X+10+64,
     YGap = 10,
+    ID = "pds",
+
+    group_rectangle(ID,"powerZone",X,Y,W,H,all),
 
     %% Ain x 8 (row=Y1,column=X1)
-    {_,Y3,_W2,_H2} = ain_group("ain", 1, 8, X1, Y1),
+    {_,Y3,_W2,_H2} = ain_group("pds.ain", 1, 8, X1, Y1),
 
-    %% Dout x 4 (row Y1,column=X2)
-    {_,_,_W5,_H5} = dout_group("dout", 1, 8, X2, Y1),
+    %% Pout x 8 (row Y1,column=X2)
+    {_,_,_W5,_H5} = pout_group("pds.pout", 1, 8, X2, Y1),
     ok.
+
 
 %% build the analog out group return next Y value
 aout_group(ID, Chan0, Chan1, X0, Y0) ->
@@ -433,13 +472,13 @@ aout_group(ID, Chan0, Chan1, X0, Y0) ->
     YGap   = 8,
     {Y2,W2} = lists:foldl(
 		fun(Chan, {Yi,Wi}) ->
-			{_,Y1,W1,_H1} = aout(Chan, X0+XLeft, Yi),
+			{_,Y1,W1,_H1} = aout(ID,Chan,X0+XLeft,Yi),
 			{Y1+YGap, max(Wi,W1)}
 		end, {Y0+YTop,0}, lists:seq(Chan0, Chan1)),
     Y3 = Y2+YBot,
     H = Y3-Y0,
     W = XLeft+W2+XRight,
-    group_rectangle(ID,"Aout",X0,Y0,W,H),
+    group_rectangle(ID,"Aout",X0,Y0,W,H,false),
     {X0,Y3,W,H}.
 
 %% build the pwm out group return next Y value
@@ -449,13 +488,13 @@ pout_group(ID, Chan0, Chan1, X0, Y0) ->
     YGap   = 8,
     {Y2,W2} = lists:foldl(
 		fun(Chan, {Yi,Wi}) ->
-			{_,Y1,W1,_H1} = pout(Chan, X0+XLeft, Yi),
+			{_,Y1,W1,_H1} = pout(ID,Chan,X0+XLeft,Yi),
 			{Y1+YGap, max(Wi,W1)}
 		end, {Y0+YTop,0}, lists:seq(Chan0, Chan1)),
     Y3 = Y2+YBot,
     H = Y3-Y0,
     W = XLeft+W2+XRight,
-    group_rectangle(ID,"Pout",X0,Y0,W,H),
+    group_rectangle(ID,"Pout",X0,Y0,W,H,false),
     {X0,Y3,W,H}.
 
 ain_group(ID, Chan0, Chan1, X0, Y0) ->
@@ -464,13 +503,13 @@ ain_group(ID, Chan0, Chan1, X0, Y0) ->
     YGap   = 4,
     {Y2,W2} = lists:foldl(
 		fun(Chan, {Yi,Wi}) ->
-			{_,Y1,W1,_H1} = ain(Chan, X0+XLeft, Yi),
+			{_,Y1,W1,_H1} = ain(ID,Chan,X0+XLeft,Yi),
 			{Y1+YGap, max(Wi,W1)}
 		end, {Y0+YTop,0}, lists:seq(Chan0, Chan1)),
     Y3 = Y2-YGap+YBot,
     H = Y3-Y0,
     W = XLeft+W2+XRight,
-    group_rectangle(ID,"Ain",X0,Y0,W,H),
+    group_rectangle(ID,"Ain",X0,Y0,W,H,false),
     {X0,Y3,W,H}.
 
 din_group(ID, Chan0, Chan1, X0, Y0) ->
@@ -479,13 +518,13 @@ din_group(ID, Chan0, Chan1, X0, Y0) ->
     YGap   = 4,
     {Y2,W2} = lists:foldl(
 		fun(Chan, {Yi,Wi}) ->
-			{_,Y1,W1,_H1} = din(Chan, X0+XLeft, Yi),
+			{_,Y1,W1,_H1} = din(ID,Chan,X0+XLeft, Yi),
 			{Y1+YGap, max(Wi,W1)}
 		end, {Y0+YTop,0}, lists:seq(Chan0, Chan1)),
     Y3 = Y2-YGap+YBot,
     H = Y3-Y0,
     W = XLeft+W2+XRight,
-    group_rectangle(ID,"Din",X0,Y0,W,H),
+    group_rectangle(ID,"Din",X0,Y0,W,H,false),
     {X0,Y3,W,H}.
 
 dout_group(ID, Chan0, Chan1, X0, Y0) ->
@@ -494,18 +533,18 @@ dout_group(ID, Chan0, Chan1, X0, Y0) ->
     YGap   = 8,
     {Y2,W2} = lists:foldl(
 		fun(Chan, {Yi,Wi}) ->
-			{_,Y1,W1,_H1} = dout(Chan, X0+XLeft, Yi),
+			{_,Y1,W1,_H1} = dout(ID,Chan,X0+XLeft, Yi),
 			{Y1+YGap, max(Wi,W1)}
 		end, {Y0+YTop,0}, lists:seq(Chan0, Chan1)),
     Y3 = Y2-YGap+YBot,
     H = Y3-Y0,
     W = XLeft+W2+XRight,
-    group_rectangle(ID,"Dout",X0,Y0,W,H),
+    group_rectangle(ID,"Dout",X0,Y0,W,H,false),
     {X0,Y3,W,H}.
 
 
-dout(Chan, X, Y) ->
-    ID = "dout_"++integer_to_list(Chan),
+dout(ID0,Chan,X,Y) ->
+    ID = ID0++[$_|integer_to_list(Chan)],
     W = 24, H = 12,
     SELF = self(),
     hex_epx:init_event(in,
@@ -523,15 +562,16 @@ dout(Chan, X, Y) ->
 		      end),
     {X,Y+H+3,W+3,H+3}.
 
-din(Chan, X, Y) ->
-    ID = "din_"++integer_to_list(Chan),
+din(ID0,Chan,X,Y) ->
+    ID = ID0++[$_|integer_to_list(Chan)],
     W = 24, H = 12,
     hex_epx:init_event(out,
 		       [{id,ID},{type,value},
 			{halign,center},{valign,center},
 			{x,X},{y,Y},{width,W},{height,H},
 			{children_first,false},
-			{font,[{name,"Arial"},{weight,bold},{size,10}]},
+			{font,[{name,"Arial"},{weight,bold},
+			       {size,?DIN_FONT_SIZE}]},
 			{fill,solid},{color,white},
 			{format,"~w"}
 		       ]),
@@ -544,16 +584,16 @@ din(Chan, X, Y) ->
 			{width,W+2},{height,H+2}]),
     {X,Y+H+2,W+2,H+2}.
 
-
-ain(Chan, X, Y) ->
-    ID = "ain_"++integer_to_list(Chan),
+ain(ID0,Chan,X,Y) ->
+    ID = ID0++[$_|integer_to_list(Chan)],
     W = 32, H = 12,    
     hex_epx:init_event(out,
 		       [{id,ID},{type,value},
 			{halign,center},{valign,center},
 			{x,X},{y,Y},{width,W},{height,H},
 			{children_first,false},
-			{font,[{name,"Arial"},{weight,bold},{size,10}]},
+			{font,[{name,"Arial"},{weight,bold},
+			       {size,?AIN_FONT_SIZE}]},
 			{fill,solid},{color,white},
 			{format,"~5w"},
 			{value,0}
@@ -567,9 +607,8 @@ ain(Chan, X, Y) ->
 			{width,W+2},{height,H+2}]),
     {X,Y+H+2,W+2,H+2}.
     
-
-aout(Chan, X, Y) ->
-    ID = "aout_"++integer_to_list(Chan),
+aout(ID0,Chan,X, Y) ->
+    ID = ID0++[$_|integer_to_list(Chan)],
     W = 64, H = 12,
     SELF = self(),
     hex_epx:init_event(in,
@@ -587,8 +626,8 @@ aout(Chan, X, Y) ->
 		      end),
     {X,Y+H,W,H}.
 
-pout(Chan, X, Y) ->
-    ID = "aout_"++integer_to_list(Chan),
+pout(ID0,Chan,X,Y) ->
+    ID = ID0++[$_|integer_to_list(Chan)],
     W = 64, H = 12,
     SELF = self(),
     hex_epx:init_event(in,
@@ -607,21 +646,26 @@ pout(Chan, X, Y) ->
     {X,Y+H,W,H}.
 
 
-group_rectangle(ID,Text,X,Y,W,H) ->
+group_rectangle(ID,Text,X,Y,W,H,Hidden) ->
     hex_epx:init_event(out,
-		       [{id,ID++"-border"},
+		       [{id,ID},
+			{hidden,Hidden},
 			{type,rectangle},
+			{children_first, false},
 			{color,black},{x,X},{y,Y},
 			{width,W},{height,H}]),
     hex_epx:init_event(out,
-		       [{id,ID++"-text"},
+		       [{id,ID++".tag"},
 			{type,text},
-			{font,[{name,"Arial"},{slant,roman},{size,10}]},
+			{font,[{name,"Arial"},{slant,roman},
+			       {size,?GROUP_FONT_SIZE}]},
+			{font_color, red},
 			{text,Text},
+			{relative, true},
 			{color,white},{fill,solid},
-			{halign,center},
-			{x,X+3},{y,Y-5},
-			{width,25},{height,10}
+			{halign,left},
+			{x,5},{y,-5},
+			{height,10}  %% width,25
 		       ]).
 
 
