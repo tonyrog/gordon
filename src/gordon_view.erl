@@ -109,7 +109,7 @@ init(Options) ->
     Height = proplists:get_value(height, Options, 480),
     node_table(Width div 2, Height),
 
-    control_demo(Width div 2, 10, Width div 2, Height),
+    control_demo(Width div 2, 10, Width div 3, Height-32),
 
     can_router:attach(),
 
@@ -209,7 +209,7 @@ handle_info({row_select,_ID,[{press,1},{row,R}]},State) ->
 				    selected_sff = SFF,
 				    selected_id  = PDx
 				  },
-	    hex_epx:output([{id,PDx}],[{hidden,false}]),
+	    hex_epx:output([{id,PDx}],[{hidden,false},{disabled,false}]),
 	    io:format("select row=~w, eff=~8.16.0B, sff=~3.16.0B id=~s\n",
 		      [R, EFF, SFF, PDx]),
 	    {noreply, State2}
@@ -219,21 +219,44 @@ handle_info({row_select,_ID,[{press,0},{row,_R}]},State) ->
     {noreply, State};
 
 
-handle_info({switch,Label,[{value,Value}]},State) ->
-    SubInd = case Label of
-		 [_,_,_|".dout_7"] -> 7;
-		 [_,_,_|".dout_8"] -> 8;
-		 [_,_,_|".dout_9"] -> 9;
-		 [_,_,_|".dout_10"] -> 10;
-		 _ -> -1
-	     end,
-    case Value of
-	0 ->
-	    send_pdo2_tx(State#state.selected_eff,?MSG_DIGITAL,SubInd,0),
-	    hex_epx:output([{id,Label}],[{color,lightgray},{text,"OFF"}]);
-	1 ->
-	    send_pdo2_tx(State#state.selected_eff,?MSG_DIGITAL,SubInd,1),
-	    hex_epx:output([{id,Label}],[{color,green},{text,"ON"}])
+handle_info({switch,ID,[{value,Value}]},State) ->
+    Si = case ID of
+	     "pdb.pout_1.onoff" -> 1;
+	     "pdb.pout_2.onoff" -> 2;
+	     "pdb.pout_3.onoff" -> 3;
+	     "pdb.pout_4.onoff" -> 4;
+	     "pdb.aout_5.onoff" -> 5;
+	     "pdb.aout_6.onoff" -> 6;
+	     "pdb.dout_7" -> 7;
+	     "pdb.dout_8" -> 8;
+	     "pdb.dout_9" -> 9;
+	     "pdb.dout_10" -> 10;
+	     
+	     "pds.pout_1.onoff" -> 1;
+	     "pds.pout_2.onoff" -> 2;
+	     "pds.pout_3.onoff" -> 3;
+	     "pds.pout_4.onoff" -> 4;
+	     "pds.pout_5.onoff" -> 5;
+	     "pds.pout_6.onoff" -> 6;
+	     "pds.pout_7.onoff" -> 7;
+	     "pds.pout_8.onoff" -> 8;
+
+	     "pdi.dout_1" -> 1;
+	     "pdi.dout_2" -> 2;
+	     "pdi.dout_3" -> 3;
+	     "pdi.dout_4" -> 4;
+	     "pdi.dout_5" -> 5;
+	     "pdi.dout_6" -> 6;
+	     "pdi.dout_7" -> 7;
+	     "pdi.dout_8" -> 8;
+	     
+	     _ -> -1
+	 end,
+    if Si =/= -1 ->
+	    io:format("switch send_onoff, ~s value=~w\n", [ID,Value]),
+	    send_onoff(State#state.selected_eff,Si,Value);
+       true ->
+	    ok
     end,
     {noreply, State};    
 handle_info(_Info, State) ->
@@ -274,7 +297,7 @@ deselect_row(undefined, State) ->
 deselect_row(_Row, State) ->
     case State#state.selected_id of
        undefined -> ok;
-       ID -> hex_epx:output([{id,ID}],[{hidden,all}])
+       ID -> hex_epx:output([{id,ID}],[{hidden,all},{disabled,all}])
     end,
     State#state { selected=undefined, selected_id=undefined }.
 
@@ -301,7 +324,6 @@ selection_layer(XOffs,YOffs,NRows,RowHeight,TableWidth) ->
     ID = "row_select",
     hex_epx:init_event(out,
 		       [{id,ID},{type,rectangle},
-			%% {fill,none},{color,red},
 			{x,XOffs},{y,YOffs+RowHeight},
 			{width,TableWidth},{height,NRows*RowHeight}]),
     hex_epx:add_event([{id,ID}],select,
@@ -551,7 +573,7 @@ dout(ID0,Chan,X,Y) ->
 		       [{id,ID},{type,switch},
 			{halign,center},
 			{x,X},{y,Y},{width,W},{height,H},
-			{shadow_x,3},{shadow_y,3},{children_first,false},
+			{shadow_x,2},{shadow_y,2},{children_first,false},
 			{font,[{name,"Arial"},{weight,bold},{size,10}]},
 			{fill,solid},{color,lightgray},
 			{text,"OFF"}
@@ -609,11 +631,12 @@ ain(ID0,Chan,X,Y) ->
     
 aout(ID0,Chan,X, Y) ->
     ID = ID0++[$_|integer_to_list(Chan)],
-    W = 64, H = 12,
+    W = 100+32, H = 12,
     SELF = self(),
+
     hex_epx:init_event(in,
 		       [{id,ID},{type,slider},
-			{x,X+2},{y,Y+2},{width,W},{height,8},
+			{x,X+32+8},{y,Y+2},{width,100},{height,8},
 			{fill,solid},{color,lightBlue},
 			{min,0},{max,65535},
 			{orientation, horizontal},
@@ -624,15 +647,30 @@ aout(ID0,Chan,X, Y) ->
 		      fun(Signal,Env) ->
 			      SELF ! {Signal,ID,Env}
 		      end),
+    ID1 = ID++".onoff",
+    hex_epx:init_event(in,
+		       [{id,ID1},{type,switch},
+			{halign,center},
+			{x,X},{y,Y},{width,24},{height,H},
+			{shadow_x,2},{shadow_y,2},{children_first,false},
+			{font,[{name,"Arial"},{weight,bold},{size,10}]},
+			{fill,solid},{color,lightgray},
+			{text,"OFF"}
+		       ]),
+    hex_epx:add_event([{id,ID1}],switch,
+		      fun(Signal,Env) ->
+			      SELF ! {Signal,ID1,Env}
+		      end),
     {X,Y+H,W,H}.
 
 pout(ID0,Chan,X,Y) ->
     ID = ID0++[$_|integer_to_list(Chan)],
-    W = 64, H = 12,
+    W = 100+32, H = 12,
     SELF = self(),
+
     hex_epx:init_event(in,
 		       [{id,ID},{type,slider},
-			{x,X+2},{y,Y+2},{width,W},{height,8},
+			{x,X+40},{y,Y+2},{width,100},{height,8},
 			{fill,solid},{color,lightGreen},
 			{min,0},{max,65535},
 			{orientation, horizontal},
@@ -643,6 +681,21 @@ pout(ID0,Chan,X,Y) ->
 		      fun(Signal,Env) ->
 			      SELF ! {Signal,ID,Env}
 		      end),
+    ID1 = ID++".onoff",
+    hex_epx:init_event(in,
+		       [{id,ID1},{type,switch},
+			{halign,center},
+			{x,X},{y,Y},{width,24},{height,H},
+			{shadow_x,2},{shadow_y,2},{children_first,false},
+			{font,[{name,"Arial"},{weight,bold},{size,10}]},
+			{fill,solid},{color,lightgray},
+			{text,"OFF"}
+		       ]),
+    hex_epx:add_event([{id,ID1}],switch,
+		      fun(Signal,Env) ->
+			      SELF ! {Signal,ID1,Env}
+		      end),
+
     {X,Y+H,W,H}.
 
 
@@ -659,7 +712,7 @@ group_rectangle(ID,Text,X,Y,W,H,Hidden) ->
 			{type,text},
 			{font,[{name,"Arial"},{slant,roman},
 			       {size,?GROUP_FONT_SIZE}]},
-			{font_color, red},
+			{font_color, black},
 			{text,Text},
 			{relative, true},
 			{color,white},{fill,solid},
@@ -668,6 +721,8 @@ group_rectangle(ID,Text,X,Y,W,H,Hidden) ->
 			{height,10}  %% width,25
 		       ]).
 
+send_onoff(CobId, Si, Value) ->
+    send_pdo2_tx(CobId,?MSG_DIGITAL,Si,Value).
 
 
 pdo1_tx(CobID,Data,State) ->
@@ -846,11 +901,12 @@ node_message(CobID, Index, Si, Value, State) ->
     end.
 
 node_data(Index, Si, Value, State) ->
+    Prefix = State#state.selected_id++".",
     case Index of
 	?MSG_ANALOG ->
 	    if Si >= 37, Si =< 40;  %% bridgeZone 37-40
 	       Si >= 65, Si =< 68 ->  %% ioZone 65-68
-		    ID = "ain_"++integer_to_list(Si),
+		    ID = Prefix++"ain_"++integer_to_list(Si),
 		    hex_epx:output([{id,ID}],[{value,Value}]);
 	       true ->
 		    ignore
@@ -860,10 +916,57 @@ node_data(Index, Si, Value, State) ->
 	    if Si >= 33, Si =< 36;    %% bridgeZone 33-36
 	       Si >= 33, Si =< 44;    %% ioZone12 33-44
 	       Si >= 33, Si =< 64 ->  %% ioZone24 33-64
-		    ID = "din_"++integer_to_list(Si),
+		    ID = Prefix++"din_"++integer_to_list(Si),
 		    hex_epx:output([{id,ID}],[{value,Value}]);
 	       true ->
 		    ignore
+	    end;
+
+	?MSG_OUTPUT_ACTIVE ->
+	    io:format("OUTPUT_ACTIVE: si=~w, value=~w\n", [Si,Value]),
+	    case State#state.selected_id of
+		"pdb" ->
+		    case Si of
+			1 -> switch_state("pdb.pout_1.onoff",Value);
+			2 -> switch_state("pdb.pout_2.onoff",Value);
+			3 -> switch_state("pdb.pout_3.onoff",Value);
+			4 -> switch_state("pdb.pout_4.onoff",Value);
+			5 -> switch_state("pdb.aout_5.onoff",Value);
+			6 -> switch_state("pdb.aout_6.onoff",Value);
+			7 -> switch_state("pdb.dout_7",Value);
+			8 -> switch_state("pdb.dout_8",Value);
+			9 -> switch_state("pdb.dout_9",Value);
+			10 -> switch_state("pdb.dout_10",Value);
+			_ -> undefined
+		    end;
+
+		"pds" ->
+		    case Si of
+			1 -> switch_state("pds.pout_1.onoff",Value);
+			2 -> switch_state("pds.pout_2.onoff",Value);
+			3 -> switch_state("pds.pout_3.onoff",Value);
+			4 -> switch_state("pds.pout_4.onoff",Value);
+			5 -> switch_state("pds.pout_5.onoff",Value);
+			6 -> switch_state("pds.pout_6.onoff",Value);
+			7 -> switch_state("pds.pout_7.onoff",Value);
+			8 -> switch_state("pds.pout_8.onoff",Value);
+			_ -> undefined
+		    end;
+
+		"pdi" ->
+		    case Si of
+			1 -> switch_state("pdi.dout_1",Value);
+			2 -> switch_state("pdi.dout_2",Value);
+			3 -> switch_state("pdi.dout_3",Value);
+			4 -> switch_state("pdi.dout_4",Value);
+			5 -> switch_state("pdi.dout_5",Value);
+			6 -> switch_state("pdi.dout_6",Value);
+			7 -> switch_state("pdi.dout_7",Value);
+			8 -> switch_state("pdi.dout_8",Value);
+			_ -> undefined
+		    end;
+		_ ->
+		    undefined
 	    end;
 
 	?MSG_OUTPUT_STATE ->
@@ -872,7 +975,7 @@ node_data(Index, Si, Value, State) ->
 	    Duty  = Value band 16#ffff,
 	    case Si of
 		%% bridge zone: Pout=1-4, Aout =5-6, Dout=7-10
-		%% ioZone:      Dout 1-8
+		%% ioZone:      Dout=1-8
 		%% powerZone:   Pout=1-8
 		_ -> ok
 	    end;
@@ -881,6 +984,10 @@ node_data(Index, Si, Value, State) ->
     end,
     {noreply,State}.
 
+switch_state(ID,0) ->
+    hex_epx:output([{id,ID}],[{color,lightgray},{text,"OFF"}]);
+switch_state(ID,_) ->
+    hex_epx:output([{id,ID}],[{color,green},{text,"ON"}]).
 
 set_status_by_serial(Serial, Status, Ns) ->
     case take_node_by_serial(Serial, Ns) of
