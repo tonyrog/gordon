@@ -19,6 +19,8 @@
 -export([start_link/0, start/0]).
 -export([start_rpi/0]).
 
+-export([event/3]).  %% fixme better unique callback name
+
 %%-export([serial_flash_bootloader/0]).
 %%-export([can_flash_bootloader/1]).
 %%-export([can_flash_application/1, can_flash_application/2]).
@@ -37,6 +39,7 @@
 	  selected_eff=0,  %% Selected node
 	  selected_sff=0,  %% Selected node
 	  selected_id,     %% "pds"/"pdb"/"pdi"/"pdc"
+	  row_height = 1,  %% height of row selection area
 	  nodes = [] %% list of node maps
 	}).
 
@@ -66,6 +69,8 @@ start_link() ->
 
 start() ->
     application:load(gordon),
+    application:load(can),
+    application:set_env(can, wakeup, true),
     can_router:start(),
     can_udp:start(),
     hex_epx_server:start_link([{width,800}, {height,480}]),
@@ -79,6 +84,8 @@ start_rpi() ->
     application:set_env(epx, pixel_format, 'argb/little'),
     application:set_env(epx, input_mouse_device, "/dev/input/event0"),
     application:load(gordon),
+    application:load(can),
+    application:set_env(can, wakeup, true),
     can_router:start(),
     can_udp:start(),
     %% can_usb:start(0),
@@ -102,16 +109,11 @@ start_rpi() ->
 %% @end
 %%--------------------------------------------------------------------
 init(Options) ->
-    SELF = self(),
     hex_epx:output([{id,"screen"}],[{static,false}]), %% allow close
-    hex_epx:add_event([{id,"screen"}], screen,
-		      fun(Signal,Env) ->
-			      SELF ! {event,Signal,Env}
-		      end),
-
+    hex_epx:add_event([{id,"screen"}],event,?MODULE),
     Width  = proplists:get_value(width, Options, 800),
     Height = proplists:get_value(height, Options, 480),
-    node_table(Width div 2, Height),
+    RowHeight = node_table(Width div 2, Height),
 
     control_demo(Width div 2, 10, Width div 3, Height-32),
 
@@ -120,7 +122,7 @@ init(Options) ->
     %% request response from all nodes
     send_pdo1_tx(0, ?MSG_ECHO_REQUEST, 0, 0),
 
-    {ok, #state{}}.
+    {ok, #state{ row_height=RowHeight }}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -180,17 +182,20 @@ handle_info(Frame, State) when is_record(Frame,can_frame) ->
 	    io:format("Frame = ~p\n", [Frame]),
 	    {noreply, State}
     end;
-handle_info({event, screen, [{closed,true}]}, State) ->
+handle_info({event,"screen",[{closed,true}]}, State) ->
     %% fixme: try to terminate gracefully
     {stop, normal, State};
 
-handle_info({row_select,_ID,[{press,1},{row,R}]},State) ->
+%% handle select in node list
+handle_info({select,_ID,[{press,1},{x,_},{y,Y}|_]},State) ->
+    R = (Y div State#state.row_height)+1,
     case find_node_by_pos(R, State#state.nodes) of
 	false ->
 	    io:format("deselect row=~w\n", [State#state.selected]),
 	    {noreply, deselect_row(State#state.selected,State)};
 	{value,Node} ->
-	    EFF = case maps:get(serial,Node,0) of
+	    Serial = maps:get(serial,Node,0),
+	    EFF = case Serial of
 		      0 -> 0;
 		      N -> ?XCOB_ID(?PDO1_TX,N)
 		  end,
@@ -216,12 +221,12 @@ handle_info({row_select,_ID,[{press,1},{row,R}]},State) ->
 	    hex_epx:output([{id,PDx}],[{hidden,false},{disabled,false}]),
 	    io:format("select row=~w, eff=~8.16.0B, sff=~3.16.0B id=~s\n",
 		      [R, EFF, SFF, PDx]),
+	    send_pdo1_tx(0, ?MSG_REFRESH, 0, 0),
 	    {noreply, State2}
     end;
-handle_info({row_select,_ID,[{press,0},{row,_R}]},State) ->
-    %% ignore mouse release
+handle_info({select,_ID,[{press,0},{x,_},{y,_}|_]},State) ->
+    %% ignore mouse release in node selection
     {noreply, State};
-
 
 handle_info({switch,ID,[{value,Value}]},State) ->
     Si = case ID of
@@ -257,12 +262,41 @@ handle_info({switch,ID,[{value,Value}]},State) ->
 	     _ -> -1
 	 end,
     if Si =/= -1 ->
-	    ?dbg("switch send_onoff, ~s value=~w\n", [ID,Value]),
-	    send_onoff(State#state.selected_eff,Si,Value);
+	    ?dbg("switch send_digital2, ~s value=~w\n", [ID,Value]),
+	    send_digital2(State#state.selected_eff,Si,Value);
        true ->
 	    ok
     end,
-    {noreply, State};    
+    {noreply, State};
+
+
+handle_info({analog,ID,[{value,Value}]},State) ->
+    Si = case ID of
+	     "pdb.aout.e5" -> 5;
+	     "pdb.aout.e6" -> 6;
+	     "pdb.pout.e1" -> 1;
+	     "pdb.pout.e2" -> 2;
+	     "pdb.pout.e3" -> 3;
+	     "pdb.pout.e4" -> 4;
+
+	     "pds.pout.e1" -> 1;
+	     "pds.pout.e2" -> 2;
+	     "pds.pout.e3" -> 3;
+	     "pds.pout.e4" -> 4;
+	     "pds.pout.e5" -> 5;
+	     "pds.pout.e6" -> 6;
+	     "pds.pout.e7" -> 7;
+	     "pds.pout.e8" -> 8;
+	     _ -> -1
+	 end,
+    if Si =/= -1 ->
+	    ?dbg("analog send_analog2, ~s value=~w\n", [ID,Value]),
+	    send_analog2(State#state.selected_eff,Si,Value);
+       true ->
+	    ok
+    end,
+    {noreply, State};
+
 handle_info(_Info, State) ->
     io:format("gordon_view: got info ~p\n", [_Info]),
     {noreply, State}.
@@ -296,6 +330,14 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
+%%
+%% Event callback from epxy
+%%
+event(Signal,ID,Env) ->
+    %% just send it as info message to access
+    io:format("Got event callback ~p\n", [{Signal,ID,Env}]),
+    ?SERVER ! {Signal,ID,Env}.
+
 deselect_row(undefined, State) ->
     State;
 deselect_row(_Row, State) ->
@@ -321,26 +363,16 @@ node_table(W,_H) ->
     TabWidth = TabX - XOffs,
     [row(I,XOffs,YOffs,TxW,TxH,W) || I <- lists:seq(1,NRows)],
     %% create a invisible overlay for row selection
-    selection_layer(XOffs, YOffs, NRows, TxH, TabWidth).
+    selection_layer(XOffs, YOffs, NRows, TxH, TabWidth),
+    TxH.
 
 selection_layer(XOffs,YOffs,NRows,RowHeight,TableWidth) ->
-    SELF = self(),
     ID = "row_select",
     hex_epx:init_event(out,
 		       [{id,ID},{type,rectangle},
 			{x,XOffs},{y,YOffs+RowHeight},
 			{width,TableWidth},{height,NRows*RowHeight}]),
-    hex_epx:add_event([{id,ID}],select,
-		      fun(_Signal,[{press,1},{x,_},{y,Y}|_]) ->
-			      Row = (Y div RowHeight)+1,
-			      SELF ! {row_select,ID,[{press,1},{row,Row}]};
-			 (_Signal,[{press,0},{x,_},{y,Y}|_]) ->
-			      Row = (Y div RowHeight)+1,
-			      SELF ! {row_select,ID,[{press,0},{row,Row}]};
-			 (_Signal, _Env) ->
-			      io:format("bad select signal=~w, env=~w\n",
-					[_Signal,_Env])
-		      end).
+    hex_epx:add_event([{id,ID}],select,?MODULE).
 
 %% install table header return next X location
 header(I,XOffs,YOffs,TxW,TxH,_W) ->
@@ -571,7 +603,6 @@ dout_group(ID, Chan0, Chan1, X0, Y0) ->
 dout(ID0,Chan,X,Y) ->
     ID = ID0++[$.,$e|integer_to_list(Chan)],
     W = 24, H = 12,
-    SELF = self(),
     hex_epx:init_event(in,
 		       [{id,ID},{type,switch},
 			{halign,center},
@@ -582,10 +613,7 @@ dout(ID0,Chan,X,Y) ->
 			{fill,solid},{color,lightgray},
 			{text,"OFF"}
 		       ]),
-    hex_epx:add_event([{id,ID}],switch,
-		      fun(Signal,Env) ->
-			      SELF ! {Signal,ID,Env}
-		      end),
+    hex_epx:add_event([{id,ID}],switch,?MODULE),
     {X,Y+H,W,H}.
 
 din(ID0,Chan,X,Y) ->
@@ -638,7 +666,6 @@ ain(ID0,Chan,X,Y) ->
 aout(ID0,Chan,X,Y) ->
     ID = ID0++[$.,$e|integer_to_list(Chan)],
     W = 100+32, H = 12,
-    SELF = self(),
     hex_epx:init_event(in,
 		       [{id,ID},{type,slider},
 			{x,X+40},{y,Y+2},{width,100},{height,8},
@@ -649,10 +676,7 @@ aout(ID0,Chan,X,Y) ->
 			{border,1},
 			{topimage, "$/gordon//priv/knob.png"}
 		       ]),
-    hex_epx:add_event([{id,ID}],analog,
-		      fun(Signal,Env) ->
-			      SELF ! {Signal,ID,Env}
-		      end),
+    hex_epx:add_event([{id,ID}],analog,?MODULE),
     ID1 = ID++".onoff",
     hex_epx:init_event(in,
 		       [{id,ID1},{type,switch},
@@ -664,17 +688,12 @@ aout(ID0,Chan,X,Y) ->
 			{fill,solid},{color,lightgray},
 			{text,"OFF"}
 		       ]),
-    hex_epx:add_event([{id,ID1}],switch,
-		      fun(Signal,Env) ->
-			      SELF ! {Signal,ID1,Env}
-		      end),
+    hex_epx:add_event([{id,ID1}],switch,?MODULE),
     {X,Y+H,W,H}.
 
 pout(ID0,Chan,X,Y) ->
     ID = ID0++[$.,$e|integer_to_list(Chan)],
     W = 100+32, H = 12,
-    SELF = self(),
-
     hex_epx:init_event(in,
 		       [{id,ID},{type,slider},
 			{x,X+40},{y,Y+2},{width,100},{height,8},
@@ -685,10 +704,7 @@ pout(ID0,Chan,X,Y) ->
 			{border, 1},
 			{topimage, "$/gordon//priv/knob.png"}
 		       ]),
-    hex_epx:add_event([{id,ID}],analog,
-		      fun(Signal,Env) ->
-			      SELF ! {Signal,ID,Env}
-		      end),
+    hex_epx:add_event([{id,ID}],analog,?MODULE),
     ID1 = ID++".onoff",
     hex_epx:init_event(in,
 		       [{id,ID1},{type,switch},
@@ -700,11 +716,7 @@ pout(ID0,Chan,X,Y) ->
 			{fill,solid},{color,lightgray},
 			{text,"OFF"}
 		       ]),
-    hex_epx:add_event([{id,ID1}],switch,
-		      fun(Signal,Env) ->
-			      SELF ! {Signal,ID1,Env}
-		      end),
-
+    hex_epx:add_event([{id,ID1}],switch,?MODULE),
     {X,Y+H,W,H}.
 
 
@@ -732,9 +744,11 @@ group_rectangle(ID,Text,X,Y,W,H,Status,Relative) ->
 			{height,10}  %% width,25
 		       ]).
 
-send_onoff(CobId, Si, Value) ->
+send_digital2(CobId, Si, Value) ->
     send_pdo2_tx(CobId,?MSG_DIGITAL,Si,Value).
 
+send_analog2(CobId, Si, Value) ->
+    send_pdo2_tx(CobId,?MSG_ANALOG,Si,Value).
 
 pdo1_tx(CobID,Data,State) ->
     case Data of
@@ -890,14 +904,17 @@ node_running(_CobId, Serial, State) ->
 		      send_sdo_rx(XCobId, ?IX_IDENTITY_OBJECT,
 				  ?SI_IDENTITY_PRODUCT),
 		      send_sdo_rx(XCobId, ?INDEX_BOOT_VSN, 0),
-		      send_pdo1_tx(XCobId, ?MSG_REFRESH, 0, 0)
-		      %% ...
+		      if XCobId =:= State#state.selected_eff ->
+			      send_pdo1_tx(0, ?MSG_REFRESH, 0, 0);
+			 true ->
+			      ok
+		      end
 	      end),
 	    {noreply, State};
 	{value,_Node} ->
 	    %% Node is present in node list
 	    %% XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
-	    %% send_pdo1_tx(XCobId, ?MSG_REFRESH, 0, 0)
+	    %% send_pdo1_tx(0, ?MSG_REFRESH, 0, 0)
 	    {noreply, State}
     end.
 
@@ -913,14 +930,15 @@ node_message(CobID, Index, Si, Value, State) ->
 node_data(Index, Si, Value, State) ->
     case Index of
 	?MSG_ANALOG ->
-	    ?dbg("MSG_ANALOG: si=~w, value=~w\n", [Si,Value]),
+	    ?dbg("MSG_ANALOG: [~s], si=~w, value=~w\n",
+		 [State#state.selected_id,Si,Value]),
 	    case State#state.selected_id of
 		"pdb" ->
 		    case Si of
 			37 -> set_value("pdb.ain.e37", Value);
 			38 -> set_value("pdb.ain.e38", Value);
 			39 -> set_value("pdb.ain.e39", Value);
-			30 -> set_value("pdb.ain.e40", Value);
+			40 -> set_value("pdb.ain.e40", Value);
 			_ -> ok
 		    end;
 		"pds" ->
@@ -948,7 +966,8 @@ node_data(Index, Si, Value, State) ->
 	    end;
 
 	?MSG_DIGITAL ->
-	    ?dbg("MSG_DIGITAL: si=~w, value=~w\n", [Si,Value]),
+	    ?dbg("MSG_DIGITAL: [~s], si=~w, value=~w\n", 
+		 [State#state.selected_id,Si,Value]),
 	    case State#state.selected_id of
 		"pdb" ->
 		    case Si of
@@ -979,7 +998,8 @@ node_data(Index, Si, Value, State) ->
 	    end;
 
 	?MSG_OUTPUT_ACTIVE ->
-	    ?dbg("MSG_OUTPUT_ACTIVE: si=~w, value=~w\n", [Si,Value]),
+	    ?dbg("MSG_OUTPUT_ACTIVE: [~s], si=~w, value=~w\n", 
+		 [State#state.selected_id,Si,Value]),
 	    case State#state.selected_id of
 		"pdb" ->
 		    case Si of
@@ -1027,8 +1047,10 @@ node_data(Index, Si, Value, State) ->
 
 	?MSG_OUTPUT_STATE ->
 	    OnOff = (Value bsr 24) band 16#ff,
-	    State = (Value bsr 16) band 16#ff,
+	    OutSt = (Value bsr 16) band 16#ff,
 	    Duty  = Value band 16#ffff,
+	    ?dbg("MSG_OUTPUT_STATE: [~s], si=~w,on=~w,state=~w,duty=~w\n", 
+		 [State#state.selected_id,Si,OnOff,OutSt,Duty]),
 	    case Si of
 		%% bridge zone: Pout=1-4, Aout =5-6, Dout=7-10
 		%% ioZone:      Dout=1-8
