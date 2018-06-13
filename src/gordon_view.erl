@@ -529,92 +529,127 @@ control_demo(X, Y, W, H) ->
     powerZone(X,Y,W,H).
 
 %% bridgeZone layout
-bridgeZone(X,Y,W,H) ->
-    Y1 = Y+10,
-    X1 = X+10,
-    X2 = X+10+64,
+bridgeZone(X,Y,_W,_H) ->
+    XGap = 10,
     YGap = 10,
+    Y1 = Y+YGap,
+    X1 = X+XGap,
+    X2 = X1+64,
+
     ID = "pdb",
 
-    group_rectangle(ID,"bridgeZone",X,Y,W,H,all,false),
-
     %% Aout x 2 (row=Y1,column X1)
-    {_,Y2,_W1,_H1} = aout_group("pdb.aout", 5, 6, X1, Y1),
+    {_,Y2,W1,H1} = aout_group("pdb.aout", 5, 6, X1, Y1),
 
     %% Ain x 4 (row=Y2,column=X1)
-    {_,Y3,_W2,_H2} = ain_group("pdb.ain", 37, 40, X1, Y2+YGap),
+    {_,Y3,W2,H2} = ain_group("pdb.ain", 37, 40, X1, Y2+YGap),
 
     %% Din x 4 (row Y3,column=X1)
-    {_,_,_W3,_H3} = din_group("pdb.din", 33, 36, X1, Y3+YGap),
+    {_,_,W3,H3} = din_group("pdb.din", 33, 36, X1, Y3+YGap),
 
     %% Pout x 4 (row=Y2,column=X2)
-    {_,Y4,_W4,_H4} = pout_group("pdb.pout", 1, 4, X2, Y2+YGap),
+    {_,Y4,W4,H4} = pout_group("pdb.pout", 1, 4, X2, Y2+YGap),
 
     %% Dout x 4 (row Y3,column=X2)
-    {_,_,_W5,_H5} = dout_group("pdb.dout", 7, 10, X2, Y4+YGap),
+    {_,Y5,W5,H5} = dout_group("pdb.dout", 7, 10, X2, Y4+YGap),
+
+    {_W6,H6} = add_buttons(ID, X1, Y5+YGap),
+
+    Wt = max(W1,max(W2+W4+XGap, W3+W5+XGap))+2*XGap,
+    Ht = YGap+H1+YGap+max(H2+YGap+H3, H4+YGap+H5)+YGap+H6+YGap,
+
+    group_rectangle(ID,"bridgeZone",X,Y,Wt,Ht,all,false),
+
     ok.
 
-ioZone(X,Y,W,H) ->
-    Y1 = Y+10,
-    X1 = X+10,
-    X2 = X+10+64,
+ioZone(X,Y,_W,_H) ->
+    XGap = 10,
     YGap = 10,
+    Y1 = Y+YGap,
+    X1 = X+XGap,
+    X2 = X1+64,
     ID = "pdi",
 
-    group_rectangle(ID,"ioZone",X,Y,W,H,all,false),
+    %% Din x 12 (row Y3,column=X1) support iozone24?
+    {_,Y2,W2,H2} = din_group("pdi.din", 33, 44, X1, Y1),
 
     %% Ain x 4 (row=Y1,column=X1)
-    {_,Y3,_W2,_H2} = ain_group("pdi.ain", 65, 68, X1, Y1),
-
-    %% Din x 12 (row Y3,column=X1) support iozone24?
-    {_,_,_W3,_H3} = din_group("pdi.din", 33, 44, X1, Y3+YGap),
+    {_,Y3,W3,H3} = ain_group("pdi.ain", 65, 68, X1, Y2+YGap),
 
     %% Dout x 8 (row Y3,column=X2)
-    {_,_,_W5,_H5} = dout_group("pdi.dout", 1, 8, X2, Y1),
+    {_,_,W4,H4} = dout_group("pdi.dout", 1, 8, X2, Y1),
+
+    Y4 = Y3+YGap+H4,
+    {_W6,H6} = add_buttons(ID, X1, Y4),
+
+    Wt = XGap+max(W2,W3+W4+XGap)+XGap,
+    Ht = YGap+max(H2+H3+YGap,H4)+YGap+H6+2*YGap,
+
+    group_rectangle(ID,"ioZone",X,Y,Wt,Ht,all,false),
+
     ok.
 
-powerZone(X,Y,W,H) ->
-    Y1 = Y+10,
-    X1 = X+10,
-    X2 = X+10+64,
+powerZone(X,Y,_W,_H) ->
+    XGap = 10,
     YGap = 10,
+    Y1 = Y+YGap,
+    X1 = X+XGap,
     ID = "pds",
 
-    group_rectangle(ID,"powerZone",X,Y,W,H,all,false),
-
     %% Ain x 8 (row=Y1,column=X1)
-    {_,_Y3,_W2,_H2} = ain_group("pds.ain", 1, 8, X1, Y1),
+    {_,_Y3,W2,H2} = ain_group("pds.ain", 1, 8, X1, Y1),
 
+    X2 = X1+W2+XGap,
     %% Pout x 8 (row Y1,column=X2)
-    {_,_,_W5,H5} = pout_group("pds.pout", 1, 8, X2, Y1),
+    {_,_,W3,H3} = pout_group("pds.pout", 1, 8, X2, Y1),
 
-    Y2 = Y1 + H5 + YGap,
-    %% add hold and go buttons
+    X3 = X2+W3+XGap,
+    %% Aload x 8 (row=Y1,column=X3)
+    {_,_Y4,W4,H4} = aload_group("pds.aload", 33, 40, X3, Y1),
+
+    H5 = max(H2,max(H3,H4)),
+
+    Y5 = Y1 + H5 + YGap,
+
+    {_W6,H6} = add_buttons(ID, X1, Y5),
+
+    Wt = XGap+W2+XGap+W3+XGap+W4+XGap,
+    Ht = YGap+max(H2,max(H3,H4))+YGap+H6+YGap,
+
+    group_rectangle(ID,"powerZone",X,Y,Wt,Ht,all,false),
+
+    ok.
+
+%% add hold and go buttons
+add_buttons(ID, X, Y) ->
+    W = 48,
+    H = 15,
     hex_epx:init_event(in,
-		       [{id,"pds.hold"},{type,button},
+		       [{id,ID++".hold"},{type,button},
 			{halign,center},
-			{x,X1},{y,Y2},{width,48},{height,15},
+			{x,X},{y,Y},{width,W},{height,H},
 			{shadow_x,2},{shadow_y,2},{children_first,false},
 			{font,[{name,"Arial"},{weight,bold},
 			       {size,?BUTTON_FONT_SIZE}]},
 			{fill,solid},{color,lightgray},
 			{text,"Hold"}
 		       ]),
-    hex_epx:add_event([{id,"pds.hold"}],button,?MODULE),
+    hex_epx:add_event([{id,ID++".hold"}],button,?MODULE),
 
+    X1 = X + 64,
     hex_epx:init_event(in,
-		       [{id,"pds.go"},{type,button},
+		       [{id,ID++".go"},{type,button},
 			{halign,center},
-			{x,X2},{y,Y2},{width,48},{height,15},
+			{x,X1},{y,Y},{width,W},{height,H},
 			{shadow_x,2},{shadow_y,2},{children_first,false},
 			{font,[{name,"Arial"},{weight,bold},
 			       {size,?BUTTON_FONT_SIZE}]},
 			{fill,solid},{color,lightgray},
 			{text,"Go"}
 		       ]),
-    hex_epx:add_event([{id,"pds.go"}],button,?MODULE),
+    hex_epx:add_event([{id,ID++".go"}],button,?MODULE),
+    {W+64+W, H}.
 
-    ok.
 
 %% build the analog out group return next Y value
 aout_group(ID, Chan0, Chan1, X0, Y0) ->
@@ -663,10 +698,25 @@ ain_group(ID, Chan0, Chan1, X0, Y0) ->
     group_rectangle(ID,"Ain",X0,Y0,W,H,false,false),
     {X0,Y3,W,H}.
 
+aload_group(ID, Chan0, Chan1, X0, Y0) ->
+    XLeft  = 12, XRight = 12,
+    YTop   = 12, YBot   = 12,
+    YGap   = 8,
+    {Y2,W2} = lists:foldl(
+		fun(Chan, {Yi,Wi}) ->
+			{_,Y1,W1,_H1} = aload(ID,Chan,XLeft,Yi),
+			{Y1+YGap, max(Wi,W1)}
+		end, {YTop,0}, lists:seq(Chan0, Chan1)),
+    Y3 = Y0+(Y2-YGap)+YBot,
+    H = Y3-Y0,
+    W = XLeft+W2+XRight,
+    group_rectangle(ID,"Aload",X0,Y0,W,H,false,false),
+    {X0,Y3,W,H}.
+
 din_group(ID, Chan0, Chan1, X0, Y0) ->
     XLeft  = 12, XRight = 12,
     YTop   = 12, YBot   = 12,
-    YGap   = 4,
+    YGap   = 8,
     {Y2,W2} = lists:foldl(
 		fun(Chan, {Yi,Wi}) ->
 			{_,Y1,W1,_H1} = din(ID,Chan,XLeft, Yi),
@@ -747,6 +797,31 @@ ain(ID0,Chan,X,Y) ->
 			{fill,solid},{color,white},
 			{format,"~5w"},
 			{value,0}
+		       ]),
+    hex_epx:init_event(out,
+		       [{id,ID++".border"},
+			{type,rectangle},
+			{color,black},
+			{relative,true},
+			{x,-1},{y,-1},
+			{width,W+2},{height,H+2}]),
+    {X,Y+H,W,H}.
+
+aload(ID0,Chan,X,Y) ->
+    ID = ID0++[$.,$e|integer_to_list(Chan)],
+    W = 32, H = 12,    
+    hex_epx:init_event(out,
+		       [{id,ID},{type,value},
+			{halign,center},{valign,center},
+			{x,X},{y,Y},{width,W},{height,H},
+			{relative,true},
+			{children_first,false},
+			{font,[{name,"Arial"},{weight,bold},
+			       {size,?AIN_FONT_SIZE}]},
+			{fill,solid},{color,white},
+			{format,"~.2f"},
+			{value,0},
+			{vscale, 1/100}
 		       ]),
     hex_epx:init_event(out,
 		       [{id,ID++".border"},
@@ -1070,6 +1145,16 @@ node_data(Index, Si, Value, State) ->
 			6 -> set_value("pds.ain.e6", Value);
 			7 -> set_value("pds.ain.e7", Value);
 			8 -> set_value("pds.ain.e8", Value);
+			
+			%% load values
+			33 -> set_value("pds.aload.e33", Value/100);
+			34 -> set_value("pds.aload.e34", Value/100);
+			35 -> set_value("pds.aload.e35", Value/100);
+			36 -> set_value("pds.aload.e36", Value/100);
+		        37 -> set_value("pds.aload.e37", Value/100);
+			38 -> set_value("pds.aload.e38", Value/100);
+			39 -> set_value("pds.aload.e39", Value/100);
+			40 -> set_value("pds.aload.e40", Value/100);
 			_ -> ok
 		    end;
 		"pdi" ->
@@ -1173,7 +1258,7 @@ node_data(Index, Si, Value, State) ->
 	    case Si of
 		%% bridge zone: Pout=1-4, Aout =5-6, Dout=7-10
 		%% ioZone:      Dout=1-8
-		%% powerZone:   Pout=1-8
+		%% powerZone:   Pout=1-8  Ain=1-8,  Aload=33-40
 		_ -> ok
 	    end;
 	_ ->
