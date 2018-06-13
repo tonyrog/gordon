@@ -33,12 +33,15 @@
 
 -record(state,
 	{
-	  uart,      %% serial flash uart device
-	  timer,     %% CANbus ping timer
+	  uart,            %% serial flash uart device
+	  timer,           %% CANbus ping timer
+	  hold_mode=false, %% hold the (selected) booting node
 	  selected,        %% Selected node
 	  selected_eff=0,  %% Selected node
 	  selected_sff=0,  %% Selected node
 	  selected_id,     %% "pds"/"pdb"/"pdi"/"pdc"
+	  table_x_offset=0,
+	  table_y_offset=0,
 	  row_height = 1,  %% height of row selection area
 	  nodes = [] %% list of node maps
 	}).
@@ -47,6 +50,7 @@
 -define(DIN_FONT_SIZE, 12).
 -define(DOUT_FONT_SIZE, 12).
 -define(AIN_FONT_SIZE, 12).
+-define(BUTTON_FONT_SIZE, 12).
 -define(GROUP_FONT_SIZE, 10).
 
 -define(dbg(F,A), io:format((F),(A))).
@@ -113,7 +117,7 @@ init(Options) ->
     hex_epx:add_event([{id,"screen"}],event,?MODULE),
     Width  = proplists:get_value(width, Options, 800),
     Height = proplists:get_value(height, Options, 480),
-    RowHeight = node_table(Width div 2, Height),
+    {XOffset,YOffset,RowHeight} = node_table(Width div 2, Height),
 
     control_demo(Width div 2, 10, Width div 3, Height-32),
 
@@ -122,7 +126,10 @@ init(Options) ->
     %% request response from all nodes
     send_pdo1_tx(0, ?MSG_ECHO_REQUEST, 0, 0),
 
-    {ok, #state{ row_height=RowHeight }}.
+    {ok, #state{ row_height = RowHeight, 
+		 table_x_offset = XOffset,
+		 table_y_offset = YOffset
+	       }}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -187,8 +194,8 @@ handle_info({event,"screen",[{closed,true}]}, State) ->
     {stop, normal, State};
 
 %% handle select in node list
-handle_info({select,_ID,[{press,1},{x,_},{y,Y}|_]},State) ->
-    R = (Y div State#state.row_height)+1,
+handle_info({select,"nodes.r"++RTxt,[{press,1},{x,_X},{y,_Y}|_]},State) ->
+    R = list_to_integer(RTxt),
     case find_node_by_pos(R, State#state.nodes) of
 	false ->
 	    io:format("deselect row=~w\n", [State#state.selected]),
@@ -213,11 +220,12 @@ handle_info({select,_ID,[{press,1},{x,_},{y,Y}|_]},State) ->
 		  end,
 	    io:format("deselect row=~w\n", [State#state.selected]),
 	    State1 = deselect_row(State#state.selected,State),
-	    State2 = State1#state { selected = Node, 
+	    State2 = State1#state { selected = Node,
 				    selected_eff = EFF,
 				    selected_sff = SFF,
 				    selected_id  = PDx
 				  },
+	    select_row(R),
 	    hex_epx:output([{id,PDx}],[{hidden,false},{disabled,false}]),
 	    io:format("select row=~w, eff=~8.16.0B, sff=~3.16.0B id=~s\n",
 		      [R, EFF, SFF, PDx]),
@@ -269,6 +277,39 @@ handle_info({switch,ID,[{value,Value}]},State) ->
     end,
     {noreply, State};
 
+handle_info({button,[_,_,_|".hold"],[{value,1}]},State) ->
+    %% send a reset and set hold mode
+    Node = State#state.selected,
+    if Node =:= undefined ->
+	    {noreply,State};
+       true ->
+	    Serial = maps:get(serial,Node,0),
+	    send_pdo1_tx(0, ?MSG_RESET, 0, Serial),
+	    {noreply,State#state{hold_mode = true }}
+    end;
+
+handle_info({button,[_,_,_|".go"],[{value,1}]},State) ->
+    %% try run a node after flash update (when in boot mode)
+    Node = State#state.selected,
+    if Node =:= undefined ->
+	    {noreply,State};
+       true ->
+	    Status = maps:get(status,Node,up),
+	    Serial = maps:get(serial,Node,0),
+	    %% io:format("Serial = ~w, Status = ~w\n", [Serial, Status]),
+	    if Status =:= boot ->
+		    XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
+		    WDT = 1,
+		    send_sdo_set(XCobId, ?INDEX_UBOOT_GO, 0, WDT),
+		    {noreply,State};
+	       true ->
+		    {noreply,State}
+	    end
+    end;
+
+handle_info({button,_ID,[{value,0}]},State) ->
+    %% ignore button release
+    {noreply,State};
 
 handle_info({analog,ID,[{value,Value}]},State) ->
     Si = case ID of
@@ -338,12 +379,20 @@ event(Signal,ID,Env) ->
     io:format("Got event callback ~p\n", [{Signal,ID,Env}]),
     ?SERVER ! {Signal,ID,Env}.
 
+select_row(Row) ->
+    RowID = "nodes.r"++integer_to_list(Row),
+    hex_epx:output([{id,RowID}],[{hidden,false}]).
+
 deselect_row(undefined, State) ->
     State;
-deselect_row(_Row, State) ->
+deselect_row(Node, State) ->
+    Row = maps:get(pos,Node,0),
     case State#state.selected_id of
-       undefined -> ok;
-       ID -> hex_epx:output([{id,ID}],[{hidden,all},{disabled,all}])
+	undefined -> ok;
+	PDx ->
+	    RowID = "nodes.r"++integer_to_list(Row),
+	    hex_epx:output([{id,PDx}],[{hidden,all},{disabled,all}]),
+	    hex_epx:output([{id,RowID}],[{hidden,true}])
     end,
     State#state { selected=undefined, selected_id=undefined }.
 
@@ -359,79 +408,97 @@ node_table(W,_H) ->
     XOffs = 8,
     YOffs = 8,
     NRows = 16,
-    TabX = header(0,XOffs,YOffs,TxW,TxH,W),
+    ID = "nodes",
+    TabX = table_header(ID,TxW,TxH,W),
     TabWidth = TabX - XOffs,
-    [row(I,XOffs,YOffs,TxW,TxH,W) || I <- lists:seq(1,NRows)],
-    %% create a invisible overlay for row selection
-    selection_layer(XOffs, YOffs, NRows, TxH, TabWidth),
-    TxH.
-
-selection_layer(XOffs,YOffs,NRows,RowHeight,TableWidth) ->
-    ID = "row_select",
-    hex_epx:init_event(out,
-		       [{id,ID},{type,rectangle},
-			{x,XOffs},{y,YOffs+RowHeight},
-			{width,TableWidth},{height,NRows*RowHeight}]),
-    hex_epx:add_event([{id,ID}],select,?MODULE).
+    %% create parent after header, order only important at the time of draw
+    table(ID,XOffs,YOffs,TabWidth,NRows*TxH),
+    [table_row(ID,I,TxW,TxH,W) || I <- lists:seq(1,NRows)],
+    {XOffs,YOffs,TxH}.
 
 %% install table header return next X location
-header(I,XOffs,YOffs,TxW,TxH,_W) ->
-    Y = I*TxH+YOffs,
+table_header(Parent,TxW,TxH,_W) ->
+    ID = Parent++".h", %%
+    X = 0,
+    Y = 0,
     H = TxH,
-    Opts = [{font_color,white}, {color,black}, {fill,solid}],
-    X0 = XOffs,
+    Opts = [{font_color,white},{color,black},{fill,solid}],
+
+    row(ID,X,Y,(6+3+10+3+5)*TxW+(1+1+1+1+1),H,true),
+
+    X0 = 0,
     W0 = 6*TxW,
-    text_cell("serial_header", X0, Y, W0, H,
+    text_cell(ID++".serial", X0, Y, W0, H,
 	      [{text,"Serial"},{halign,right}|Opts]),
     X1 = X0 + W0 + 1,
     W1 = 3*TxW,
-    text_cell("id_header", X1, Y, W1, H, 
+    text_cell(ID++".id", X1, Y, W1, H, 
 	      [{text,"ID"},{halign,right}|Opts]),
     X2 = X1 + W1 + 1,
     W2 = 10*TxW,
-    text_cell("product_header", X2, Y, W2, H,
+    text_cell(ID++".product", X2, Y, W2, H,
 	      [{text,"Product"},{halign,center}|Opts]),
     X3 = X2 + W2 + 1,
     W3 = 3*TxW,
-    text_cell("vsn_header", X3, Y, W3, H,
+    text_cell(ID++".vsn", X3, Y, W3, H,
 	      [{text,"Vsn"},{halign,center}|Opts]),
     X4 = X3 + W3 + 1,
     W4 = 5*TxW,
-    text_cell("status_header", X4, Y, W4, H,
+    text_cell(ID++".status", X4, Y, W4, H,
 	      [{text,"Status"},{halign,center}|Opts]),
     X4 + W4 + 1.
 
 %% install table row return next X location
-row(I,XOffs,YOffs,TxW,TxH,_W) ->
-    II = integer_to_list(I),
-    Y = I*TxH+YOffs,
-    H = TxH,
+table_row(Parent,I,TxW,TxH,_W) ->
+    ID = Parent++[$.,$r|integer_to_list(I)], %% <id>.r<i>
+    X = 0, Y = I*TxH, H = TxH,
 
-    X0 = XOffs,
+    %% parent to table cells
+    row(ID,X,Y,(6+3+10+3+5)*TxW+(1+1+1+1+1),H,false),
+    hex_epx:add_event([{id,ID}],select,?MODULE),
+    
+    %% and now the cells
+    X0 = 0,
     W0 = 6*TxW,
-    text_cell("serial_"++II, X0, Y, W0, H,
+    text_cell(ID++".serial", X0, 0, W0, H,
 	      [{text,""},{halign,right}]),
     X1 = X0 + W0 + 1,
     W1 = 3*TxW,
-    text_cell("id_"++II, X1, Y, W1, H,
+    text_cell(ID++".id", X1, 0, W1, H,
 	      [{text,""},{halign,right}]),
     X2 = X1 + W1 + 1,
     W2 = 10*TxW,
-    text_cell("product_"++II, X2, Y, W2, H,
+    text_cell(ID++".product", X2, 0, W2, H,
 	      [{text,""},{halign,center}]),
     X3 = X2 + W2 + 1,
     W3 = 3*TxW,
-    text_cell("vsn_"++II, X3, Y, W3, H,
+    text_cell(ID++".vsn", X3, 0, W3, H,
 	      [{text,""},{halign,center}]),
     X4 = X3 + W3 + 1,
     W4 = 5*TxW,
-    text_cell("status_"++II, X4, Y, W4, H,
+    text_cell(ID++".status", X4, 0, W4, H,
 	      [{text,""},{halign,center}]),
     X4 + W4 + 1.
 
-text_cell(ID, X, Y, W, H, Opts) ->
-    text(ID, X, Y, W, H, Opts),
-    border(ID, X, Y, W, H, Opts).
+%% parent to all rows
+table(ID, X, Y, W, H) ->
+    hex_epx:init_event(out,
+		       [{id,ID},{type,rectangle},
+			{relative,true},{hidden,true},{disabled,true},
+			{x,X},{y,Y},{width,W},{height,H}]).
+
+%% parent to all cells maybe used for row selections? 
+row(ID, X, Y, W, H, Disabled) ->
+    hex_epx:init_event(out,
+		       [{id,ID},{type,rectangle},
+			{relative,true},{hidden,true},{disabled,Disabled},
+			{children_first,false},
+			{fill,blend},{color,red},
+			{x,X},{y,Y},{width,W},{height,H}]).
+
+text_cell(ID,X,Y,W,H,Opts) ->
+    text(ID,X,Y,W,H,Opts),
+    border(ID,W,H,Opts).
 
 text_cell_dimension() ->
     text("dummy", 0, 0, 10, 10, [{text,""}]),
@@ -446,14 +513,14 @@ text(ID,X,Y,W,H,Opts) ->
 		       [{id,ID},{type,text},
 			{font,[{name,"Arial"},{slant,roman},{weight,bold},
 			       {size,?TEXT_CELL_FONT_SIZE}]},
-			{x,X},{y,Y},
+			{x,X},{y,Y},{relative,true},
 			{width,W},{height,H},{valign,center}|Opts]).
 
-border(ID,_X,_Y,W,H,_Opts) ->
+border(ID,W,H,_Opts) ->
     hex_epx:init_event(out,
 		       [{id,ID++".border"},{type,rectangle},
-			{relative, true},
-			{color,black},{x,-1},{y,-1},{width,W+2},{height,H+2}]).
+			{relative,true},
+			{color,black},{x,-1},{y,0},{width,W+2},{height,H+1}]).
 
 %% draw various "widgets"
 control_demo(X, Y, W, H) ->
@@ -510,7 +577,7 @@ powerZone(X,Y,W,H) ->
     Y1 = Y+10,
     X1 = X+10,
     X2 = X+10+64,
-    %% YGap = 10,
+    YGap = 10,
     ID = "pds",
 
     group_rectangle(ID,"powerZone",X,Y,W,H,all,false),
@@ -519,7 +586,34 @@ powerZone(X,Y,W,H) ->
     {_,_Y3,_W2,_H2} = ain_group("pds.ain", 1, 8, X1, Y1),
 
     %% Pout x 8 (row Y1,column=X2)
-    {_,_,_W5,_H5} = pout_group("pds.pout", 1, 8, X2, Y1),
+    {_,_,_W5,H5} = pout_group("pds.pout", 1, 8, X2, Y1),
+
+    Y2 = Y1 + H5 + YGap,
+    %% add hold and go buttons
+    hex_epx:init_event(in,
+		       [{id,"pds.hold"},{type,button},
+			{halign,center},
+			{x,X1},{y,Y2},{width,48},{height,15},
+			{shadow_x,2},{shadow_y,2},{children_first,false},
+			{font,[{name,"Arial"},{weight,bold},
+			       {size,?BUTTON_FONT_SIZE}]},
+			{fill,solid},{color,lightgray},
+			{text,"Hold"}
+		       ]),
+    hex_epx:add_event([{id,"pds.hold"}],button,?MODULE),
+
+    hex_epx:init_event(in,
+		       [{id,"pds.go"},{type,button},
+			{halign,center},
+			{x,X2},{y,Y2},{width,48},{height,15},
+			{shadow_x,2},{shadow_y,2},{children_first,false},
+			{font,[{name,"Arial"},{weight,bold},
+			       {size,?BUTTON_FONT_SIZE}]},
+			{fill,solid},{color,lightgray},
+			{text,"Go"}
+		       ]),
+    hex_epx:add_event([{id,"pds.go"}],button,?MODULE),
+
     ok.
 
 %% build the analog out group return next Y value
@@ -555,9 +649,9 @@ pout_group(ID, Chan0, Chan1, X0, Y0) ->
     {X0,Y3,W,H}.
 
 ain_group(ID, Chan0, Chan1, X0, Y0) ->
-    XLeft  = 8, XRight = 8,
-    YTop   = 12, YBot   = 8,
-    YGap   = 4,
+    XLeft  = 12, XRight = 12,
+    YTop   = 12, YBot   = 12,
+    YGap   = 8,
     {Y2,W2} = lists:foldl(
 		fun(Chan, {Yi,Wi}) ->
 			{_,Y1,W1,_H1} = ain(ID,Chan,XLeft,Yi),
@@ -570,8 +664,8 @@ ain_group(ID, Chan0, Chan1, X0, Y0) ->
     {X0,Y3,W,H}.
 
 din_group(ID, Chan0, Chan1, X0, Y0) ->
-    XLeft  = 8, XRight = 8,
-    YTop   = 12, YBot   = 8,
+    XLeft  = 12, XRight = 12,
+    YTop   = 12, YBot   = 12,
     YGap   = 4,
     {Y2,W2} = lists:foldl(
 		fun(Chan, {Yi,Wi}) ->
@@ -825,7 +919,7 @@ send_pdo2_tx(CobId, Index, SubInd, Value) ->
 
 
 %% generate a request to read node values
-send_sdo_rx(CobId, Index, SubInd) ->
+send_sdo_get(CobId, Index, SubInd) ->
     Bin = ?sdo_ccs_initiate_upload_request(0,Index,SubInd,0),
     CobId1 = case ?is_cobid_extended(CobId) of
 		 true ->
@@ -838,6 +932,23 @@ send_sdo_rx(CobId, Index, SubInd) ->
     CanId = ?COBID_TO_CANID(CobId1),
     Frame = #can_frame { id=CanId,len=8,data=Bin},
     can:send(Frame).
+
+%% generate a request to read node values
+send_sdo_set(CobId, Index, SubInd, Value) ->
+    Bin = ?sdo_ccs_initiate_download_request(0,3,1,1,Index,SubInd,
+					     <<Value:32/little>>),
+    CobId1 = case ?is_cobid_extended(CobId) of
+		 true ->
+		     NodeId = ?XNODE_ID(CobId),
+		     ?XCOB_ID(?SDO_RX,NodeId);
+		 false ->
+		     NodeId = ?NODE_ID(CobId),
+		     ?COB_ID(?SDO_RX,NodeId)
+	     end,
+    CanId = ?COBID_TO_CANID(CobId1),
+    Frame = #can_frame { id=CanId,len=8,data=Bin},
+    can:send(Frame).
+
 
 %% reply from node
 sdo_tx(CobId,Bin,State) ->  
@@ -877,7 +988,15 @@ sdo_value(1,3,<<Value:8/little,_:24>>) -> Value.
 node_booted(_CobID, Serial, State) ->
     ?dbg("Node ~s booted\n", [integer_to_list(Serial,16)]),
     Nodes = set_status_by_serial(Serial, boot, State#state.nodes),
-    {noreply, State#state { nodes=Nodes }}.
+    if State#state.hold_mode ->
+	    XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
+	    WDT = 0,
+	    send_sdo_set(XCobId, ?INDEX_UBOOT_HOLD, 0, WDT),
+	    {noreply, State#state { nodes=Nodes, hold_mode=false }};
+       true ->
+	    {noreply, State#state { nodes=Nodes }}
+    end.
+
 
 node_started(_CobId, Serial, State) ->
     ?dbg("Node ~6.16.0B started\n", [Serial]),
@@ -886,8 +1005,8 @@ node_started(_CobId, Serial, State) ->
       fun() ->
 	      XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
 	      ?dbg("XCobId = ~8.16.0B\n", [XCobId]),
-	      send_sdo_rx(XCobId, ?INDEX_ID, 0),
-	      send_sdo_rx(XCobId, ?IX_IDENTITY_OBJECT, ?SI_IDENTITY_PRODUCT)
+	      send_sdo_get(XCobId, ?INDEX_ID, 0),
+	      send_sdo_get(XCobId, ?IX_IDENTITY_OBJECT, ?SI_IDENTITY_PRODUCT)
 	      %% ...
       end),
     {noreply, State#state { nodes=Nodes }}.
@@ -900,10 +1019,10 @@ node_running(_CobId, Serial, State) ->
 	      fun() ->
 		      XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
 		      io:format("XCobId = ~8.16.0B\n", [XCobId]),
-		      send_sdo_rx(XCobId, ?INDEX_ID, 0),
-		      send_sdo_rx(XCobId, ?IX_IDENTITY_OBJECT,
+		      send_sdo_get(XCobId, ?INDEX_ID, 0),
+		      send_sdo_get(XCobId, ?IX_IDENTITY_OBJECT,
 				  ?SI_IDENTITY_PRODUCT),
-		      send_sdo_rx(XCobId, ?INDEX_BOOT_VSN, 0),
+		      send_sdo_get(XCobId, ?INDEX_BOOT_VSN, 0),
 		      if XCobId =:= State#state.selected_eff ->
 			      send_pdo1_tx(0, ?MSG_REFRESH, 0, 0);
 			 true ->
@@ -1148,9 +1267,11 @@ set_by_cobid(CobID,Key,Value,State) ->
 to_text(Int) when is_integer(Int) -> integer_to_list(Int);
 to_text(Text) when is_atom(Text) -> Text;
 to_text(Text) when is_list(Text) -> Text.
-	    
+
+%% set text value in nodes table
+%% nodes.r<pos>.<key>
 set_text(Key,Pos,Value) ->
-    ID = atom_to_list(Key) ++ "_" ++ integer_to_list(Pos),
+    ID = "nodes.r"++integer_to_list(Pos)++"."++atom_to_list(Key),
     io:format("set_text: id=~s, value=~s\n", [ID,Value]),
     hex_epx:output([{id,ID}],[{text,Value}]).
 
