@@ -77,7 +77,7 @@ start() ->
     application:set_env(can, wakeup, true),
     can_router:start(),
     can_udp:start(),
-    hex_epx_server:start_link([{width,800}, {height,480}]),
+    epxy:start_link([{width,800}, {height,480}]),
     gen_server:start({local, ?SERVER}, ?MODULE, [{width,800}, {height,480}],
 		     []).
 
@@ -93,7 +93,7 @@ start_rpi() ->
     can_router:start(),
     can_udp:start(),
     %% can_usb:start(0),
-    hex_epx_server:start_link([{width,800}, {height,480}]),
+    epxy:start_link([{width,800}, {height,480}]),
     gen_server:start({local, ?SERVER}, ?MODULE, [{width,800},{height,480}],
 		     []).
 
@@ -113,13 +113,21 @@ start_rpi() ->
 %% @end
 %%--------------------------------------------------------------------
 init(Options) ->
-    hex_epx:output([{id,"screen"}],[{static,false}]), %% allow close
-    hex_epx:add_event([{id,"screen"}],event,?MODULE),
+    epxy:set("screen",[{static,false}]), %% allow close
+    epxy:add_callback("screen",event,?MODULE),
     Width  = proplists:get_value(width, Options, 800),
     Height = proplists:get_value(height, Options, 480),
+
     {XOffset,YOffset,RowHeight} = node_table(Width div 2, Height),
 
-    control_demo(Width div 2, 10, Width div 3, Height-32),
+    %% define various layouts
+    X = Width div 2,
+    Y = 10,
+    W = Width div 3,
+    H = Height - 32,
+    bridgeZone(X,Y,W,H),
+    ioZone(X,Y,W,H),
+    powerZone(X,Y,W,H),
 
     can_router:attach(),
 
@@ -226,7 +234,7 @@ handle_info({select,"nodes.r"++RTxt,[{press,1},{x,_X},{y,_Y}|_]},State) ->
 				    selected_id  = PDx
 				  },
 	    select_row(R),
-	    hex_epx:output([{id,PDx}],[{hidden,false},{disabled,false}]),
+	    epxy:set(PDx,[{hidden,false},{disabled,false}]),
 	    io:format("select row=~w, eff=~8.16.0B, sff=~3.16.0B id=~s\n",
 		      [R, EFF, SFF, PDx]),
 	    send_pdo1_tx(0, ?MSG_REFRESH, 0, 0),
@@ -278,34 +286,28 @@ handle_info({switch,ID,[{value,Value}]},State) ->
     {noreply, State};
 
 handle_info({button,[_,_,_|".hold"],[{value,1}]},State) ->
-    %% send a reset and set hold mode
-    Node = State#state.selected,
-    if Node =:= undefined ->
-	    {noreply,State};
-       true ->
-	    Serial = maps:get(serial,Node,0),
-	    send_pdo1_tx(0, ?MSG_RESET, 0, Serial),
-	    {noreply,State#state{hold_mode = true }}
-    end;
+    action_hold(State);
 
 handle_info({button,[_,_,_|".go"],[{value,1}]},State) ->
-    %% try run a node after flash update (when in boot mode)
-    Node = State#state.selected,
-    if Node =:= undefined ->
-	    {noreply,State};
-       true ->
-	    Status = maps:get(status,Node,up),
-	    Serial = maps:get(serial,Node,0),
-	    %% io:format("Serial = ~w, Status = ~w\n", [Serial, Status]),
-	    if Status =:= boot ->
-		    XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
-		    WDT = 1,
-		    send_sdo_set(XCobId, ?INDEX_UBOOT_GO, 0, WDT),
-		    {noreply,State};
-	       true ->
-		    {noreply,State}
-	    end
-    end;
+    action_go(State);
+
+handle_info({button,[_,_,_|".upgrade"],[{value,1}]},State) ->
+    action_upgrade(State);
+
+handle_info({button,[_,_,_|".reset"],[{value,1}]},State) ->
+    action_reset(State);
+
+handle_info({button,[_,_,_|".setup"],[{value,1}]},State) ->
+    action_setup(State);
+
+handle_info({button,[_,_,_|".factory"],[{value,1}]},State) ->
+    action_factory(State);
+
+handle_info({button,[_,_,_|".save"],[{value,1}]},State) ->
+    action_save(State);
+
+handle_info({button,[_,_,_|".restore"],[{value,1}]},State) ->
+    action_restore(State);
 
 handle_info({button,_ID,[{value,0}]},State) ->
     %% ignore button release
@@ -371,6 +373,159 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
+%% send a reset and set hold mode
+action_hold(State) ->
+    Node = State#state.selected,
+    if Node =:= undefined ->
+	    {noreply,State};
+       true ->
+	    Serial = maps:get(serial,Node,0),
+	    send_pdo1_tx(0, ?MSG_RESET, 0, Serial),
+	    {noreply,State#state{hold_mode = true }}
+    end.
+
+%% leave boot mode
+action_go(State) ->
+    Node = State#state.selected,
+    if Node =:= undefined ->
+	    {noreply,State};
+       true ->
+	    Status = maps:get(status,Node,undefined),
+	    Serial = maps:get(serial,Node,0),
+	    %% io:format("Serial = ~w, Status = ~w\n", [Serial, Status]),
+	    if Status =:= boot ->
+		    XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
+		    WDT = 1,
+		    send_sdo_set(XCobId, ?INDEX_UBOOT_GO, 0, WDT),
+		    {noreply,State};
+	       true ->
+		    {noreply,State}
+	    end
+    end.
+
+action_upgrade(State) ->
+    {noreply,State}.
+
+%% reset the node
+action_reset(State) ->
+    %% send a reset and set hold mode
+    Node = State#state.selected,
+    if Node =:= undefined ->
+	    {noreply,State};
+       true ->
+	    Serial = maps:get(serial,Node,0),
+	    send_pdo1_tx(0, ?MSG_RESET, 0, Serial),
+	    {noreply,State#state{hold_mode = false }}
+    end.
+
+%% Setup node for testing
+action_setup(State) ->
+    Node = State#state.selected,
+    if Node =:= undefined ->
+	    {noreply,State};
+       true ->
+	    Status = maps:get(status,Node,undefined),
+	    Serial = maps:get(serial,Node,0),
+	    if Status =:= up ->
+		    XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
+		    case State#state.selected_id of
+			"pdb" -> bridgeZone_setup(XCobId,State);
+			"pds" -> powerZone_setup(XCobId,State);
+			"pdi" -> ioZone_setup(XCobId,State);
+			"pdc" -> controlZone_setup(XCobId,State);
+			_ -> {noreply,State}
+		    end;
+	       true ->
+		    {noreply,State}
+	    end
+    end.
+
+%% set factory default value
+action_factory(State) ->
+    Node = State#state.selected,
+    if Node =:= undefined ->
+	    {noreply,State};
+       true ->
+	    Status = maps:get(status,Node,undefined),
+	    Serial = maps:get(serial,Node,0),
+	    %% io:format("Serial = ~w, Status = ~w\n", [Serial, Status]),
+	    if Status =:= up ->
+		    XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
+		    send_sdo_set(XCobId, 
+				 ?IX_RESTORE_DEFAULT_PARAMETERS,
+				 4,<<"daol">>),
+		    %% FIXME: wait for restore to complete!
+		    {noreply,State};
+	       true ->
+		    {noreply,State}
+	    end
+    end.
+
+%% save current paramters
+action_save(State) ->
+    Node = State#state.selected,
+    if Node =:= undefined ->
+	    {noreply,State};
+       true ->
+	    Status = maps:get(status,Node,undefined),
+	    Serial = maps:get(serial,Node,0),
+	    %% io:format("Serial = ~w, Status = ~w\n", [Serial, Status]),
+	    if Status =:= up ->
+		    XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
+		    send_sdo_set(XCobId, ?IX_STORE_PARAMETERS,1,
+				 <<"evas">>),
+		    %% FIXME: wait for save to complete!
+		    {noreply,State};
+	       true ->
+		    {noreply,State}
+	    end
+    end.
+
+%% restore to saved parameters
+action_restore(State) ->
+    Node = State#state.selected,
+    if Node =:= undefined ->
+	    {noreply,State};
+       true ->
+	    Status = maps:get(status,Node,undefined),
+	    Serial = maps:get(serial,Node,0),
+	    %% io:format("Serial = ~w, Status = ~w\n", [Serial, Status]),
+	    if Status =:= up ->
+		    XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
+		    send_sdo_set(XCobId,
+				 ?IX_RESTORE_DEFAULT_PARAMETERS,
+				 1,<<"daol">>),
+		    %% FIXME: wait for load to complete!
+		    {noreply,State};
+	       true ->
+		    {noreply,State}
+	    end
+    end.
+
+powerZone_setup(_XCobId,_State) ->
+    %% set output-type:1-8 dimmer
+    %% set output-max-step:1-8 255
+    %% set output-flags:1-8 anload,outact
+    ok.
+
+bridgeZone_setup(_XCobId, _State) ->
+    %% set output-type:1-6 dimmer
+    %% set output-max-step:1-6 255
+    %% set output-type:7-10 onoff
+    %% set output-flags:1-10 outact
+    %%
+    ok.
+
+ioZone_setup(XCobId,_State) ->
+    %% set output-type:1-8 onoff
+    %% set output-flags:7-10 outact
+    ok.
+
+controlZone_setup(_XCobId,_State) ->
+    %% set output-type:1-8 onoff
+    %% set output-flags:7-10 outact
+    ok.
+
 %%
 %% Event callback from epxy
 %%
@@ -381,7 +536,7 @@ event(Signal,ID,Env) ->
 
 select_row(Row) ->
     RowID = "nodes.r"++integer_to_list(Row),
-    hex_epx:output([{id,RowID}],[{hidden,false}]).
+    epxy:set(RowID,[{hidden,false}]).
 
 deselect_row(undefined, State) ->
     State;
@@ -391,8 +546,8 @@ deselect_row(Node, State) ->
 	undefined -> ok;
 	PDx ->
 	    RowID = "nodes.r"++integer_to_list(Row),
-	    hex_epx:output([{id,PDx}],[{hidden,all},{disabled,all}]),
-	    hex_epx:output([{id,RowID}],[{hidden,true}])
+	    epxy:set(PDx,[{hidden,all},{disabled,all}]),
+	    epxy:set(RowID,[{hidden,true}])
     end,
     State#state { selected=undefined, selected_id=undefined }.
 
@@ -455,7 +610,7 @@ table_row(Parent,I,TxW,TxH,_W) ->
 
     %% parent to table cells
     row(ID,X,Y,(6+3+10+3+5)*TxW+(1+1+1+1+1),H,false),
-    hex_epx:add_event([{id,ID}],select,?MODULE),
+    epxy:add_callback(ID,select,?MODULE),
     
     %% and now the cells
     X0 = 0,
@@ -482,19 +637,17 @@ table_row(Parent,I,TxW,TxH,_W) ->
 
 %% parent to all rows
 table(ID, X, Y, W, H) ->
-    hex_epx:init_event(out,
-		       [{id,ID},{type,rectangle},
-			{relative,true},{hidden,true},{disabled,true},
-			{x,X},{y,Y},{width,W},{height,H}]).
+    epxy:new(ID,[{type,rectangle},
+		 {hidden,true},{disabled,true},
+		 {x,X},{y,Y},{width,W},{height,H}]).
 
 %% parent to all cells maybe used for row selections? 
 row(ID, X, Y, W, H, Disabled) ->
-    hex_epx:init_event(out,
-		       [{id,ID},{type,rectangle},
-			{relative,true},{hidden,true},{disabled,Disabled},
-			{children_first,false},
-			{fill,blend},{color,red},
-			{x,X},{y,Y},{width,W},{height,H}]).
+    epxy:new(ID,[{type,rectangle},
+		 {hidden,true},{disabled,Disabled},
+		 {children_first,false},
+		 {fill,blend},{color,red},
+		 {x,X},{y,Y},{width,W},{height,H}]).
 
 text_cell(ID,X,Y,W,H,Opts) ->
     text(ID,X,Y,W,H,Opts),
@@ -502,40 +655,30 @@ text_cell(ID,X,Y,W,H,Opts) ->
 
 text_cell_dimension() ->
     text("dummy", 0, 0, 10, 10, [{text,""}]),
-    {ok,[{font,Font}]} = hex_epx:get_event("dummy", [font]),
+    {ok,[{font,Font}]} = epxy:get("dummy", [font]),
     epx_gc:set_font(Font),
     {TxW0,TxH} = epx_font:dimension(epx_gc:current(), "Wy"),
     TxW = TxW0 div 2,
     {TxW,TxH}.
 
 text(ID,X,Y,W,H,Opts) ->
-    hex_epx:init_event(out,
-		       [{id,ID},{type,text},
-			{font,[{name,"Arial"},{slant,roman},{weight,bold},
-			       {size,?TEXT_CELL_FONT_SIZE}]},
-			{x,X},{y,Y},{relative,true},
-			{width,W},{height,H},{valign,center}|Opts]).
+    epxy:new(ID,[{type,text},
+		 {font,[{name,"Arial"},{slant,roman},{weight,bold},
+			{size,?TEXT_CELL_FONT_SIZE}]},
+		 {x,X},{y,Y},
+		 {width,W},{height,H},{valign,center}|Opts]).
 
 border(ID,W,H,_Opts) ->
-    hex_epx:init_event(out,
-		       [{id,ID++".border"},{type,rectangle},
-			{relative,true},
-			{color,black},{x,-1},{y,0},{width,W+2},{height,H+1}]).
-
-%% draw various "widgets"
-control_demo(X, Y, W, H) ->
-    bridgeZone(X,Y,W,H),
-    ioZone(X,Y,W,H),
-    powerZone(X,Y,W,H).
+    epxy:new(ID++".border",
+	     [{type,rectangle},
+	      {color,black},{x,-1},{y,0},{width,W+2},{height,H+1}]).
 
 %% bridgeZone layout
 bridgeZone(X,Y,_W,_H) ->
     XGap = 10,
     YGap = 10,
-    Y1 = Y+YGap,
-    X1 = X+XGap,
-    X2 = X1+64,
-
+    Y1 = YGap,
+    X1 = XGap,
     ID = "pdb",
 
     %% Aout x 2 (row=Y1,column X1)
@@ -547,26 +690,26 @@ bridgeZone(X,Y,_W,_H) ->
     %% Din x 4 (row Y3,column=X1)
     {_,_,W3,H3} = din_group("pdb.din", 33, 36, X1, Y3+YGap),
 
+    X2 = X1+max(W2,W3)+XGap,
+
     %% Pout x 4 (row=Y2,column=X2)
-    {_,Y4,W4,H4} = pout_group("pdb.pout", 1, 4, X2, Y2+YGap),
+    {_,Y4,W4,H4} = pout_group("pdb.pout", 4, 1, X2, Y2+YGap),
 
     %% Dout x 4 (row Y3,column=X2)
-    {_,Y5,W5,H5} = dout_group("pdb.dout", 7, 10, X2, Y4+YGap),
+    {_,Y5,W5,H5} = dout_group("pdb.dout", 10, 7, X2, Y4+YGap),
 
-    {_W6,H6} = add_buttons(ID, X1, Y5+YGap),
+    {W6,H6} = add_buttons(ID, X1, Y5+YGap),
 
-    Wt = max(W1,max(W2+W4+XGap, W3+W5+XGap))+2*XGap,
+    Wt = XGap+max(max(W1,W6),max(W2+W4+XGap, W3+W5+XGap))+XGap,
     Ht = YGap+H1+YGap+max(H2+YGap+H3, H4+YGap+H5)+YGap+H6+YGap,
-
-    group_rectangle(ID,"bridgeZone",X,Y,Wt,Ht,all,false),
-
+    group_rectangle(ID,"bridgeZone",X,Y,Wt,Ht,all),
     ok.
 
 ioZone(X,Y,_W,_H) ->
     XGap = 10,
     YGap = 10,
-    Y1 = Y+YGap,
-    X1 = X+XGap,
+    Y1 = YGap,
+    X1 = XGap,
     X2 = X1+64,
     ID = "pdi",
 
@@ -579,20 +722,20 @@ ioZone(X,Y,_W,_H) ->
     %% Dout x 8 (row Y3,column=X2)
     {_,_,W4,H4} = dout_group("pdi.dout", 1, 8, X2, Y1),
 
-    {_W6,H6} = add_buttons(ID, X1, Y3+YGap),
+    {W6,H6} = add_buttons(ID, X1, Y3+YGap),
 
-    Wt = XGap+max(W2,W3+W4+XGap)+XGap,
+    Wt = XGap+max(W2,max(W3+W4+XGap,W6))+XGap,
     Ht = YGap+max(H2+H3+YGap,H4)+YGap+H6+2*YGap,
 
-    group_rectangle(ID,"ioZone",X,Y,Wt,Ht,all,false),
+    group_rectangle(ID,"ioZone",X,Y,Wt,Ht,all),
 
     ok.
 
 powerZone(X,Y,_W,_H) ->
     XGap = 10,
     YGap = 10,
-    Y1 = Y+YGap,
-    X1 = X+XGap,
+    Y1 = YGap,
+    X1 = XGap,
     ID = "pds",
 
     %% Ain x 8 (row=Y1,column=X1)
@@ -610,48 +753,57 @@ powerZone(X,Y,_W,_H) ->
 
     Y5 = Y1 + H5 + YGap,
 
-    {_W6,H6} = add_buttons(ID, X1, Y5),
+    {W6,H6} = add_buttons(ID, X1, Y5),
 
-    Wt = XGap+W2+XGap+W3+XGap+W4+XGap,
+    Wt = XGap+max(W2+XGap+W3+XGap+W4,W6)+XGap,
     Ht = YGap+max(H2,max(H3,H4))+YGap+H6+YGap,
 
-    group_rectangle(ID,"powerZone",X,Y,Wt,Ht,all,false),
+    group_rectangle(ID,"powerZone",X,Y,Wt,Ht,all),
 
     ok.
 
+
 %% add hold and go buttons
 add_buttons(ID, X, Y) ->
-    W = 48,
+    W = 64,
     H = 15,
-    hex_epx:init_event(in,
-		       [{id,ID++".hold"},{type,button},
-			{halign,center},
-			{x,X},{y,Y},{width,W},{height,H},
-			{shadow_x,2},{shadow_y,2},{children_first,false},
-			{font,[{name,"Arial"},{weight,bold},
-			       {size,?BUTTON_FONT_SIZE}]},
-			{fill,solid},{color,lightgray},
-			{text,"Hold"}
-		       ]),
-    hex_epx:add_event([{id,ID++".hold"}],button,?MODULE),
+    YGap = 10,
+    XGap = 8,
+    X0 = X,
+    X1 = X0 + W + XGap,
+    X2 = X1 + W + XGap,
+    X3 = X2 + W + XGap,
+    Y0 = Y,
+    Y1 = Y0+H+YGap,
 
-    X1 = X + 64,
-    hex_epx:init_event(in,
-		       [{id,ID++".go"},{type,button},
-			{halign,center},
-			{x,X1},{y,Y},{width,W},{height,H},
-			{shadow_x,2},{shadow_y,2},{children_first,false},
-			{font,[{name,"Arial"},{weight,bold},
-			       {size,?BUTTON_FONT_SIZE}]},
-			{fill,solid},{color,lightgray},
-			{text,"Go"}
-		       ]),
-    hex_epx:add_event([{id,ID++".go"}],button,?MODULE),
-    {W+64+W, H}.
+    add_text_button(ID++".hold",    "Hold",    X0, Y0, W, H),
+    add_text_button(ID++".go",      "Go",      X1, Y0, W, H),
+    add_text_button(ID++".upgrade", "Upgrade", X2, Y0, W, H),
+    add_text_button(ID++".reset",   "Reset",   X3, Y0, W, H),
+
+    add_text_button(ID++".setup",   "Setup",   X0, Y1, W, H),
+    add_text_button(ID++".factory", "Factory", X1, Y1, W, H),
+    add_text_button(ID++".save",    "Save",    X2, Y1, W, H),
+    add_text_button(ID++".restore", "Restore",    X3, Y1, W, H),
+    {4*W+3*XGap,2*H+2*YGap}.
+
+add_text_button(ID, Text, X, Y, W, H) ->
+    epxy:new(ID,
+	     [{type,button},
+	      {halign,center},
+	      {x,X},{y,Y},{width,W},{height,H},
+	      {shadow_x,2},{shadow_y,2},{children_first,false},
+	      {font,[{name,"Arial"},{weight,bold},
+		     {size,?BUTTON_FONT_SIZE}]},
+	      {fill,solid},{color,lightgray},
+	      {text,Text}
+	     ]),
+    epxy:add_callback(ID,button,?MODULE).
 
 
 %% build the analog out group return next Y value
 aout_group(ID, Chan0, Chan1, X0, Y0) ->
+    Step = if Chan0 < Chan1 -> 1; true -> -1 end,
     XLeft  = 12, XRight = 12,
     YTop   = 12, YBot   = 12,
     YGap   = 8,
@@ -659,15 +811,16 @@ aout_group(ID, Chan0, Chan1, X0, Y0) ->
 		fun(Chan, {Yi,Wi}) ->
 			{_,Y1,W1,_H1} = aout(ID,Chan,XLeft,Yi),
 			{Y1+YGap, max(Wi,W1)}
-		end, {YTop,0}, lists:seq(Chan0, Chan1)),
+		end, {YTop,0}, lists:seq(Chan0,Chan1,Step)),
     Y3 = Y0+(Y2-YGap)+YBot,
     H = Y3-Y0,
     W = XLeft+W2+XRight,
-    group_rectangle(ID,"Aout",X0,Y0,W,H,false,false),
+    group_rectangle(ID,"Aout",X0,Y0,W,H,false),
     {X0,Y3,W,H}.
 
 %% build the pwm out group return next Y value
 pout_group(ID, Chan0, Chan1, X0, Y0) ->
+    Step = if Chan0 < Chan1 -> 1; true -> -1 end,
     XLeft  = 12, XRight = 12,
     YTop   = 12, YBot  = 12,
     YGap   = 8,
@@ -675,14 +828,15 @@ pout_group(ID, Chan0, Chan1, X0, Y0) ->
 		fun(Chan, {Yi,Wi}) ->
 			{_,Y1,W1,_H1} = pout(ID,Chan,XLeft,Yi),
 			{Y1+YGap, max(Wi,W1)}
-		end, {YTop,0}, lists:seq(Chan0, Chan1)),
+		end, {YTop,0}, lists:seq(Chan0,Chan1,Step)),
     Y3 = Y0+(Y2-YGap)+YBot,
     H = Y3-Y0,
     W = XLeft+W2+XRight,
-    group_rectangle(ID,"Pout",X0,Y0,W,H,false,false),
+    group_rectangle(ID,"Pout",X0,Y0,W,H,false),
     {X0,Y3,W,H}.
 
 ain_group(ID, Chan0, Chan1, X0, Y0) ->
+    Step = if Chan0 < Chan1 -> 1; true -> -1 end,
     XLeft  = 12, XRight = 12,
     YTop   = 12, YBot   = 12,
     YGap   = 8,
@@ -690,14 +844,15 @@ ain_group(ID, Chan0, Chan1, X0, Y0) ->
 		fun(Chan, {Yi,Wi}) ->
 			{_,Y1,W1,_H1} = ain(ID,Chan,XLeft,Yi),
 			{Y1+YGap, max(Wi,W1)}
-		end, {YTop,0}, lists:seq(Chan0, Chan1)),
+		end, {YTop,0}, lists:seq(Chan0,Chan1,Step)),
     Y3 = Y0+(Y2-YGap)+YBot,
     H = Y3-Y0,
     W = XLeft+W2+XRight,
-    group_rectangle(ID,"Ain",X0,Y0,W,H,false,false),
+    group_rectangle(ID,"Ain [%]",X0,Y0,W,H,false),
     {X0,Y3,W,H}.
 
 aload_group(ID, Chan0, Chan1, X0, Y0) ->
+    Step = if Chan0 < Chan1 -> 1; true -> -1 end,
     XLeft  = 12, XRight = 12,
     YTop   = 12, YBot   = 12,
     YGap   = 8,
@@ -705,14 +860,15 @@ aload_group(ID, Chan0, Chan1, X0, Y0) ->
 		fun(Chan, {Yi,Wi}) ->
 			{_,Y1,W1,_H1} = aload(ID,Chan,XLeft,Yi),
 			{Y1+YGap, max(Wi,W1)}
-		end, {YTop,0}, lists:seq(Chan0, Chan1)),
+		end, {YTop,0}, lists:seq(Chan0,Chan1,Step)),
     Y3 = Y0+(Y2-YGap)+YBot,
     H = Y3-Y0,
     W = XLeft+W2+XRight,
-    group_rectangle(ID,"Aload",X0,Y0,W,H,false,false),
+    group_rectangle(ID,"Load [A]",X0,Y0,W,H,false),
     {X0,Y3,W,H}.
 
 din_group(ID, Chan0, Chan1, X0, Y0) ->
+    Step = if Chan0 < Chan1 -> 1; true -> -1 end,
     XLeft  = 12, XRight = 12,
     YTop   = 12, YBot   = 12,
     YGap   = 8,
@@ -720,14 +876,15 @@ din_group(ID, Chan0, Chan1, X0, Y0) ->
 		fun(Chan, {Yi,Wi}) ->
 			{_,Y1,W1,_H1} = din(ID,Chan,XLeft, Yi),
 			{Y1+YGap, max(Wi,W1)}
-		end, {YTop,0}, lists:seq(Chan0, Chan1)),
+		end, {YTop,0}, lists:seq(Chan0,Chan1,Step)),
     Y3 = Y0+(Y2-YGap)+YBot,
     H = Y3-Y0,
     W = XLeft+W2+XRight,
-    group_rectangle(ID,"Din",X0,Y0,W,H,false,false),
+    group_rectangle(ID,"Din",X0,Y0,W,H,false),
     {X0,Y3,W,H}.
 
 dout_group(ID, Chan0, Chan1, X0, Y0) ->
+    Step = if Chan0 < Chan1 -> 1; true -> -1 end,
     XLeft  = 12,  XRight = 12,
     YTop   = 12, YBot  = 12,
     YGap   = 8,
@@ -735,182 +892,157 @@ dout_group(ID, Chan0, Chan1, X0, Y0) ->
 		fun(Chan, {Yi,Wi}) ->
 			{_,Y1,W1,_H1} = dout(ID,Chan,XLeft,Yi),
 			{Y1+YGap, max(Wi,W1)}
-		end, {YTop,0}, lists:seq(Chan0, Chan1)),
+		end, {YTop,0}, lists:seq(Chan0,Chan1,Step)),
     Y3 = Y0+(Y2-YGap)+YBot,
     H = Y3-Y0,
     W = XLeft+W2+XRight,
-    group_rectangle(ID,"Dout",X0,Y0,W,H,false,false),
+    group_rectangle(ID,"Dout",X0,Y0,W,H,false),
     {X0,Y3,W,H}.
 
 
 dout(ID0,Chan,X,Y) ->
     ID = ID0++[$.,$e|integer_to_list(Chan)],
     W = 24, H = 12,
-    hex_epx:init_event(in,
-		       [{id,ID},{type,switch},
-			{halign,center},
-			{x,X},{y,Y},{width,W},{height,H},
-			{relative,true},
-			{shadow_x,2},{shadow_y,2},{children_first,false},
-			{font,[{name,"Arial"},{weight,bold},{size,10}]},
-			{fill,solid},{color,lightgray},
-			{text,"OFF"}
-		       ]),
-    hex_epx:add_event([{id,ID}],switch,?MODULE),
+    epxy:new(ID,[{type,switch},
+		 {halign,center},
+		 {x,X},{y,Y},{width,W},{height,H},
+		 {shadow_x,2},{shadow_y,2},{children_first,false},
+		 {font,[{name,"Arial"},{weight,bold},{size,10}]},
+		 {fill,solid},{color,lightgray},
+		 {text,"OFF"}
+		]),
+    epxy:add_callback(ID,switch,?MODULE),
     {X,Y+H,W,H}.
 
 din(ID0,Chan,X,Y) ->
     ID = ID0++[$.,$e|integer_to_list(Chan)],
     W = 24, H = 12,
-    hex_epx:init_event(out,
-		       [{id,ID},{type,value},
-			{halign,center},{valign,center},
-			{x,X},{y,Y},{width,W},{height,H},
-			{relative,true},
-			{children_first,false},
-			{font,[{name,"Arial"},{weight,bold},
-			       {size,?DIN_FONT_SIZE}]},
-			{fill,solid},{color,white},
-			{format,"~w"}
-		       ]),
-    hex_epx:init_event(out,
-		       [{id,ID++".border"},
-			{type,rectangle},
-			{color,black},
-			{relative,true},
-			{x,-1},{y,-1},
-			{width,W+2},{height,H+2}]),
+    epxy:new(ID,[{type,value},
+		 {halign,center},{valign,center},
+		 {x,X},{y,Y},{width,W},{height,H},
+		 {children_first,false},
+		 {font,[{name,"Arial"},{weight,bold},
+			{size,?DIN_FONT_SIZE}]},
+		 {fill,solid},{color,white},
+		 {format,"~w"}
+		]),
+    epxy:new(ID++".border",
+	     [{type,rectangle},
+	      {color,black},
+	      {x,-1},{y,-1},
+	      {width,W+2},{height,H+2}]),
     {X,Y+H,W,H}.
 
 ain(ID0,Chan,X,Y) ->
     ID = ID0++[$.,$e|integer_to_list(Chan)],
-    W = 32, H = 12,    
-    hex_epx:init_event(out,
-		       [{id,ID},{type,value},
-			{halign,center},{valign,center},
-			{x,X},{y,Y},{width,W},{height,H},
-			{relative,true},
-			{children_first,false},
-			{font,[{name,"Arial"},{weight,bold},
-			       {size,?AIN_FONT_SIZE}]},
-			{fill,solid},{color,white},
-			{format,"~5w"},
-			{value,0}
-		       ]),
-    hex_epx:init_event(out,
-		       [{id,ID++".border"},
-			{type,rectangle},
-			{color,black},
-			{relative,true},
-			{x,-1},{y,-1},
-			{width,W+2},{height,H+2}]),
+    W = 40, H = 12,    
+    epxy:new(ID,[{type,value},
+		 {halign,center},{valign,center},
+		 {x,X},{y,Y},{width,W},{height,H},
+		 {children_first,false},
+		 {font,[{name,"Arial"},{weight,bold},
+			{size,?AIN_FONT_SIZE}]},
+		 {fill,solid},{color,white},
+		 {format,"~.1f"},
+		 {value,0},
+		 {vscale, 100/65535}
+		]),
+    epxy:new(ID++".border",
+	     [{type,rectangle},
+	      {color,black},
+	      {x,-1},{y,-1},
+	      {width,W+2},{height,H+2}]),
     {X,Y+H,W,H}.
 
 aload(ID0,Chan,X,Y) ->
     ID = ID0++[$.,$e|integer_to_list(Chan)],
     W = 32, H = 12,    
-    hex_epx:init_event(out,
-		       [{id,ID},{type,value},
-			{halign,center},{valign,center},
-			{x,X},{y,Y},{width,W},{height,H},
-			{relative,true},
-			{children_first,false},
-			{font,[{name,"Arial"},{weight,bold},
-			       {size,?AIN_FONT_SIZE}]},
-			{fill,solid},{color,white},
-			{format,"~.2f"},
-			{value,0},
-			{vscale, 1/100}
-		       ]),
-    hex_epx:init_event(out,
-		       [{id,ID++".border"},
-			{type,rectangle},
-			{color,black},
-			{relative,true},
-			{x,-1},{y,-1},
-			{width,W+2},{height,H+2}]),
+    epxy:new(ID,
+	     [{type,value},
+	      {halign,center},{valign,center},
+	      {x,X},{y,Y},{width,W},{height,H},
+	      {children_first,false},
+	      {font,[{name,"Arial"},{weight,bold},
+		     {size,?AIN_FONT_SIZE}]},
+	      {fill,solid},{color,white},
+	      {format,"~.2f"},
+	      {value,0},
+	      {vscale, 1/100}
+	     ]),
+    epxy:new(ID++".border",
+	     [{type,rectangle},
+	      {color,black},
+	      {x,-1},{y,-1},
+	      {width,W+2},{height,H+2}]),
     {X,Y+H,W,H}.
     
 aout(ID0,Chan,X,Y) ->
     ID = ID0++[$.,$e|integer_to_list(Chan)],
-    W = 100+32, H = 12,
-    hex_epx:init_event(in,
-		       [{id,ID},{type,slider},
-			{x,X+40},{y,Y+2},{width,100},{height,8},
-			{relative,true},
-			{fill,solid},{color,lightBlue},
-			{min,0},{max,65535},
-			{orientation, horizontal},
-			{border,1},
-			{topimage, "$/gordon//priv/knob.png"}
-		       ]),
-    hex_epx:add_event([{id,ID}],analog,?MODULE),
+    W = 100+48, H = 12,
+    epxy:new(ID,[{type,slider},
+		 {x,X+40},{y,Y+2},{width,100},{height,8},
+		 {fill,solid},{color,lightBlue},
+		 {min,0},{max,65535},
+		 {orientation, horizontal},
+		 {border,1},
+		 {topimage, "$/gordon//priv/knob.png"}
+		]),
+    epxy:add_callback(ID,analog,?MODULE),
     ID1 = ID++".onoff",
-    hex_epx:init_event(in,
-		       [{id,ID1},{type,switch},
-			{halign,center},
-			{x,-40},{y,-4},{width,24},{height,H},
-			{relative,true},
-			{shadow_x,2},{shadow_y,2},{children_first,false},
-			{font,[{name,"Arial"},{weight,bold},{size,10}]},
-			{fill,solid},{color,lightgray},
-			{text,"OFF"}
-		       ]),
-    hex_epx:add_event([{id,ID1}],switch,?MODULE),
+    epxy:new(ID1,[{type,switch},
+		  {halign,center},
+		  {x,-40},{y,-4},{width,24},{height,H},
+		  {shadow_x,2},{shadow_y,2},{children_first,false},
+		  {font,[{name,"Arial"},{weight,bold},{size,10}]},
+		  {fill,solid},{color,lightgray},
+		  {text,"OFF"}
+		 ]),
+    epxy:add_callback(ID1,switch,?MODULE),
     {X,Y+H,W,H}.
 
 pout(ID0,Chan,X,Y) ->
     ID = ID0++[$.,$e|integer_to_list(Chan)],
-    W = 100+32, H = 12,
-    hex_epx:init_event(in,
-		       [{id,ID},{type,slider},
-			{x,X+40},{y,Y+2},{width,100},{height,8},
-			{relative,true},
-			{fill,solid},{color,lightGreen},
-			{min,0},{max,65535},
-			{orientation, horizontal},
-			{border, 1},
-			{topimage, "$/gordon//priv/knob.png"}
-		       ]),
-    hex_epx:add_event([{id,ID}],analog,?MODULE),
+    W = 100+48, H = 12,
+    epxy:new(ID,[{type,slider},
+		 {x,X+40},{y,Y+2},{width,100},{height,8},
+		 {fill,solid},{color,lightGreen},
+		 {min,0},{max,65535},
+		 {orientation, horizontal},
+		 {border, 1},
+		 {topimage, "$/gordon//priv/knob.png"}
+		]),
+    epxy:add_callback(ID,analog,?MODULE),
     ID1 = ID++".onoff",
-    hex_epx:init_event(in,
-		       [{id,ID1},{type,switch},
-			{halign,center},
-			{x,-40},{y,-4},{width,24},{height,H},
-			{relative,true},
-			{shadow_x,2},{shadow_y,2},{children_first,false},
-			{font,[{name,"Arial"},{weight,bold},{size,10}]},
-			{fill,solid},{color,lightgray},
-			{text,"OFF"}
-		       ]),
-    hex_epx:add_event([{id,ID1}],switch,?MODULE),
+    epxy:new(ID1,[{type,switch},
+		  {halign,center},
+		  {x,-40},{y,-4},{width,24},{height,H},
+		  {shadow_x,2},{shadow_y,2},{children_first,false},
+		  {font,[{name,"Arial"},{weight,bold},{size,10}]},
+		  {fill,solid},{color,lightgray},
+		  {text,"OFF"}
+		 ]),
+    epxy:add_callback(ID1,switch,?MODULE),
     {X,Y+H,W,H}.
 
 
-group_rectangle(ID,Text,X,Y,W,H,Status,Relative) ->
-    hex_epx:init_event(out,
-		       [{id,ID},
-			{hidden,Status},
-			{disabled,Status},
-			{relative,Relative},
-			{type,rectangle},
-			{children_first, false},
-			{color,black},{x,X},{y,Y},
-			{width,W},{height,H}]),
-    hex_epx:init_event(out,
-		       [{id,ID++".tag"},
-			{type,text},
-			{font,[{name,"Arial"},{slant,roman},
-			       {size,?GROUP_FONT_SIZE}]},
-			{font_color, black},
-			{text,Text},
-			{relative, true},
-			{color,white},{fill,solid},
-			{halign,left},
-			{x,5},{y,-5},
-			{height,10}  %% width,25
-		       ]).
+group_rectangle(ID,Text,X,Y,W,H,Status) ->
+    epxy:new(ID,
+	     [{type,rectangle},
+	      {hidden,Status},{disabled,Status},
+	      {children_first, false},
+	      {color,black},{x,X},{y,Y},
+	      {width,W},{height,H}]),
+    epxy:new(ID++".tag",
+	     [{type,text},
+	      {font,[{name,"Arial"},{slant,roman},
+		     {size,?GROUP_FONT_SIZE}]},
+	      {font_color, black},
+	      {text,Text},
+	      {color,white},{fill,solid},
+	      {halign,left},
+	      {x,5},{y,-5},
+	      {height,10}  %% width,25
+	     ]).
 
 send_digital2(CobId, Si, Value) ->
     send_pdo2_tx(CobId,?MSG_DIGITAL,Si,Value).
@@ -1008,9 +1140,13 @@ send_sdo_get(CobId, Index, SubInd) ->
     can:send(Frame).
 
 %% generate a request to read node values
-send_sdo_set(CobId, Index, SubInd, Value) ->
-    Bin = ?sdo_ccs_initiate_download_request(0,3,1,1,Index,SubInd,
-					     <<Value:32/little>>),
+send_sdo_set(CobId, Index, SubInd, Value) when is_integer(Value) ->
+    send_sdo_set_(CobId, Index, SubInd,<<Value:32/little>>);
+send_sdo_set(CobId, Index, SubInd, Value) when is_binary(Value) ->
+    send_sdo_set_(CobId, Index, SubInd,Value).
+
+send_sdo_set_(CobId, Index, SubInd, Data) ->
+    Bin = ?sdo_ccs_initiate_download_request(0,3,1,1,Index,SubInd,Data),
     CobId1 = case ?is_cobid_extended(CobId) of
 		 true ->
 		     NodeId = ?XNODE_ID(CobId),
@@ -1146,14 +1282,14 @@ node_data(Index, Si, Value, State) ->
 			8 -> set_value("pds.ain.e8", Value);
 			
 			%% load values
-			33 -> set_value("pds.aload.e33", Value/100);
-			34 -> set_value("pds.aload.e34", Value/100);
-			35 -> set_value("pds.aload.e35", Value/100);
-			36 -> set_value("pds.aload.e36", Value/100);
-		        37 -> set_value("pds.aload.e37", Value/100);
-			38 -> set_value("pds.aload.e38", Value/100);
-			39 -> set_value("pds.aload.e39", Value/100);
-			40 -> set_value("pds.aload.e40", Value/100);
+			33 -> set_value("pds.aload.e33", Value);
+			34 -> set_value("pds.aload.e34", Value);
+			35 -> set_value("pds.aload.e35", Value);
+			36 -> set_value("pds.aload.e36", Value);
+		        37 -> set_value("pds.aload.e37", Value);
+			38 -> set_value("pds.aload.e38", Value);
+			39 -> set_value("pds.aload.e39", Value);
+			40 -> set_value("pds.aload.e40", Value);
 			_ -> ok
 		    end;
 		"pdi" ->
@@ -1266,12 +1402,12 @@ node_data(Index, Si, Value, State) ->
     {noreply,State}.
 
 switch_state(ID,0) ->
-    hex_epx:output([{id,ID}],[{color,lightgray},{text,"OFF"}]);
+    epxy:set(ID,[{color,lightgray},{text,"OFF"}]);
 switch_state(ID,_) ->
-    hex_epx:output([{id,ID}],[{color,green},{text,"ON"}]).
+    epxy:set(ID,[{color,green},{text,"ON"}]).
 
 set_value(ID, Value) ->
-    hex_epx:output([{id,ID}],[{value,Value}]).
+    epxy:set(ID,[{value,Value}]).
 
 set_status_by_serial(Serial, Status, Ns) ->
     case take_node_by_serial(Serial, Ns) of
@@ -1357,7 +1493,7 @@ to_text(Text) when is_list(Text) -> Text.
 set_text(Key,Pos,Value) ->
     ID = "nodes.r"++integer_to_list(Pos)++"."++atom_to_list(Key),
     io:format("set_text: id=~s, value=~s\n", [ID,Value]),
-    hex_epx:output([{id,ID}],[{text,Value}]).
+    epxy:set(ID,[{text,Value}]).
 
 serial_to_text(Serial) ->
     tl(integer_to_list(16#1000000 + Serial, 16)).
