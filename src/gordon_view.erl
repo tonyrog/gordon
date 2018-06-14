@@ -579,8 +579,7 @@ ioZone(X,Y,_W,_H) ->
     %% Dout x 8 (row Y3,column=X2)
     {_,_,W4,H4} = dout_group("pdi.dout", 1, 8, X2, Y1),
 
-    Y4 = Y3+YGap+H4,
-    {_W6,H6} = add_buttons(ID, X1, Y4),
+    {_W6,H6} = add_buttons(ID, X1, Y3+YGap),
 
     Wt = XGap+max(W2,W3+W4+XGap)+XGap,
     Ht = YGap+max(H2+H3+YGap,H4)+YGap+H6+2*YGap,
