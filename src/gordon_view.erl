@@ -23,6 +23,7 @@
 
 -compile(export_all).
 
+-export([firmware_info/0]).
 %%-export([serial_flash_bootloader/0]).
 %%-export([can_flash_bootloader/1]).
 %%-export([can_flash_application/1, can_flash_application/2]).
@@ -38,9 +39,9 @@
 	  uart,            %% serial flash uart device
 	  timer,           %% CANbus ping timer
 	  hold_mode=false, %% hold the (selected) booting node
-	  selected,        %% Selected node
-	  selected_eff=0,  %% Selected node
-	  selected_sff=0,  %% Selected node
+	  selected_pos,    %% Selected row | undefined
+	  selected_eff=0,  %% extended canid of selected node
+	  selected_sff=0,  %% short canid of selected node
 	  selected_id,     %% "pds"/"pdb"/"pdi"/"pdc"
 	  sdo_request,     %% current outstanding sdo_request
 	  sdo_error,       %% last sdo_error
@@ -63,8 +64,8 @@
 -define(BUTTON_WIDTH, 64).
 -define(BUTTON_HEIGHT, 15).
 
-%% -define(dbg(F,A), io:format((F),(A))).
--define(dbg(F,A), ok).
+-define(dbg(F,A), io:format((F),(A))).
+%%-define(dbg(F,A), ok).
 -define(warn(F,A), io:format((F),(A))).
 -define(error(F,A), io:format((F),(A))).
 
@@ -108,6 +109,9 @@ start_rpi() ->
     gen_server:start({local, ?SERVER}, ?MODULE, [{width,800},{height,480}],
 		     []).
 
+firmware_info() ->
+    gen_server:call(?SERVER, firmware_info).
+
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
@@ -129,7 +133,7 @@ init(Options) ->
     Width  = proplists:get_value(width, Options, 800),
     Height = proplists:get_value(height, Options, 480),
 
-    {XOffset,YOffset,RowHeight} = node_table(Width div 2, Height),
+    {_XOffset,_YOffset,RowHeight} = node_table(Width div 2, Height),
 
     %% define various layouts
     X = Width div 2,
@@ -163,6 +167,17 @@ init(Options) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_call(firmware_info, _From, State) ->
+    lists:foreach(
+      fun({uapp,{Product,Variant,Major,Minor},Banks}) ->
+	      io:format("~s ~w ~w.~w size=~wK\n",
+			[Product,Variant,Major,Minor,
+			 (firmware_size(Banks)+1023) div 1024]);
+	 ({ihex, Banks}) ->
+	      io:format("uboot firmware size=~wK\n", 
+			[(firmware_size(Banks)+1023) div 1024])
+      end, State#state.firmware),
+    {reply,ok,State};
 handle_call(_Request, _From, State) ->
     Reply = {error,bad_call},
     {reply, Reply, State}.
@@ -208,18 +223,19 @@ handle_info(Frame, State) when is_record(Frame,can_frame) ->
 	    ?dbg("Frame = ~p\n", [Frame]),
 	    {noreply, State}
     end;
+    
 handle_info({event,"screen",[{closed,true}]}, State) ->
     %% fixme: try to terminate gracefully
     {stop, normal, State};
 
 %% handle select in node list
 handle_info({select,"nodes.r"++RTxt,[{press,1},{x,_X},{y,_Y}|_]},State) ->
-    R = list_to_integer(RTxt),
-    case find_node_by_pos(R, State#state.nodes) of
+    Pos = list_to_integer(RTxt),
+    case find_node_by_pos(Pos,State#state.nodes) of
 	false ->
-	    io:format("deselect row=~w\n", [State#state.selected]),
-	    {noreply, deselect_row(State#state.selected,State)};
-	{value,Node} ->
+	    ?dbg("deselect row=~w\n", [State#state.selected_pos]),
+	    {noreply, deselect_row(State#state.selected_pos,State)};
+	Node ->
 	    Serial = maps:get(serial,Node,0),
 	    EFF = case Serial of
 		      0 -> 0;
@@ -229,7 +245,6 @@ handle_info({select,"nodes.r"++RTxt,[{press,1},{x,_X},{y,_Y}|_]},State) ->
 		      0 -> 0;
 		      M -> ?COB_ID(?PDO1_TX,M)
 		  end,
-	    AppVsn = maps:get(app_vsn,Node,0),
 	    PDx = case maps:get(product,Node,undefined) of
 		      undefined -> undefined;
 		      powerZone -> "pds";
@@ -238,26 +253,20 @@ handle_info({select,"nodes.r"++RTxt,[{press,1},{x,_X},{y,_Y}|_]},State) ->
 		      controlZone -> "pdc";
 		      _ -> undefined
 		  end,
-	    io:format("deselect row=~w\n", [State#state.selected]),
-	    State1 = deselect_row(State#state.selected,State),
-	    State2 = State1#state { selected = Node,
+	    ?dbg("deselect row=~w\n", [State#state.selected_pos]),
+	    State1 = deselect_row(State#state.selected_pos,State),
+	    State2 = State1#state { selected_pos = Pos,
 				    selected_eff = EFF,
 				    selected_sff = SFF,
 				    selected_id  = PDx
 				  },
-	    select_row(R),
+	    select_row(Pos),
 	    epxy:set(PDx,[{hidden,false},{disabled,false}]),
-	    %% FIXME: update button status according to state
-	    %%  upgrade iff state=boot and firmware is available and correct
-	    %%  factory/save/hold iff state=up
-	    %%  go state=boot
-	    %%  setup state=up
-	    %%
-	    epxy:set(PDx++".app_vsn", [{text,version_to_text(AppVsn)}]),
-	    io:format("select row=~w, eff=~8.16.0B, sff=~3.16.0B id=~s\n",
-		      [R, EFF, SFF, PDx]),
+	    State3 = refresh_node_state(Node, State2),
+	    ?dbg("select row=~w, eff=~8.16.0B, sff=~3.16.0B id=~s\n",
+		 [Pos, EFF, SFF, PDx]),
 	    send_pdo1_tx(0, ?MSG_REFRESH, 0, 0),
-	    {noreply, State2}
+	    {noreply, State3}
     end;
 handle_info({select,_ID,[{press,0},{x,_},{y,_}|_]},State) ->
     %% ignore mouse release in node selection
@@ -306,10 +315,10 @@ handle_info({switch,ID,[{value,Value}]},State) ->
 
 %% send a reset and set hold mode
 handle_info({button,[_,_,_|".hold"],[{value,1}]},State) ->
-    Node = State#state.selected,
-    if Node =:= undefined ->
+    case find_node_by_pos(State#state.selected_pos,State#state.nodes) of
+	false ->
 	    {noreply,State};
-       true ->
+	Node ->
 	    Serial = maps:get(serial,Node,0),
 	    send_pdo1_tx(0, ?MSG_RESET, 0, Serial),
 	    {noreply,State#state{hold_mode = true }}
@@ -318,6 +327,8 @@ handle_info({button,[_,_,_|".hold"],[{value,1}]},State) ->
 %% leave boot mode
 handle_info({button,[_,_,_|".go"],[{value,1}]},State) ->
     WDT = 1,
+    io:format("Go: hold=~w,selected=~w\n", [State#state.hold_mode,
+					    State#state.selected_pos]),
     {noreply,action_sdo(State,boot,?INDEX_UBOOT_GO,0,WDT)};
 
 handle_info({button,[_,_,_|".upgrade"],[{value,1}]},State) ->
@@ -331,20 +342,20 @@ handle_info({button,[_,_,_|".upgrade"],[{value,1}]},State) ->
 %% reset the node
 handle_info({button,[_,_,_|".reset"],[{value,1}]},State) ->
     %% send a reset and set hold mode
-    Node = State#state.selected,
-    if Node =:= undefined ->
+    case find_node_by_pos(State#state.selected_pos,State#state.nodes) of
+	undefined ->
 	    {noreply,State};
-       true ->
+	Node ->
 	    Serial = maps:get(serial,Node,0),
 	    send_pdo1_tx(0, ?MSG_RESET, 0, Serial),
 	    {noreply,State#state{hold_mode = false }}
     end;
 
 handle_info({button,[_,_,_|".setup"],[{value,1}]},State) ->
-    Node = State#state.selected,
-    if Node =:= undefined ->
+    case find_node_by_pos(State#state.selected_pos,State#state.nodes) of
+	undefined ->
 	    {noreply,State};
-       true ->
+	Node ->
 	    Status = maps:get(status,Node,undefined),
 	    Serial = maps:get(serial,Node,0),
 	    if Status =:= up ->
@@ -434,12 +445,92 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-action_sdo(State, Status, Index, Si, Value) ->
-    Node = State#state.selected,
-    io:format("Node selected = ~p\n", [Node]),
-    if Node =:= undefined ->
+
+%% FIXME: update button status according to state
+%%  upgrade iff state=boot and firmware is available and correct
+%%  factory/save/hold iff state=up
+%%  go state=boot
+%%  setup state=up
+%%
+refresh_node_state(State) ->
+    case find_node_by_pos(State#state.selected_pos,State#state.nodes) of
+	false -> State;
+	Node -> refresh_node_state(Node,State)
+    end.
+
+refresh_node_state(Node, State) ->
+    AppVsn = maps:get(app_vsn,Node,0),
+    PDx = State#state.selected_id,
+    epxy:set(PDx++".app_vsn", [{text,format_value(app_vsn,AppVsn)}]),
+    case maps:get(status,Node,undefined) of
+	undefined -> 
 	    State;
-       true ->
+	boot ->
+	    disable_buttons(PDx,["hold","setup","factory","save","restore"]),
+	    enable_buttons(PDx,["reset","go"]),
+	    case match_uapp_firmware(Node, State) of
+		false ->
+		    disable_buttons(PDx,["upgrade"]);
+		_UApp ->
+		    enable_buttons(PDx,["upgrade"])
+	    end,
+	    State;
+	up ->
+	    enable_buttons(PDx, ["hold","setup","factory","save","restore"]),
+	    enable_buttons(PDx,["reset"]),
+	    disable_buttons(PDx,["go","upgrade"]),
+	    State
+    end.
+
+disable_buttons(PDx, Bs) ->
+    [epxy:set(PDx++"."++B, [{font_color,white},{disabled,true}]) ||
+	B <- Bs].
+
+enable_buttons(PDx, Bs) ->
+    [epxy:set(PDx++"."++B, [{font_color,black},{disabled,false}]) ||
+	B <- Bs].
+
+match_uapp_firmware(Node, State) ->
+    Product = maps:get(product,Node,undefined),
+    Vsn = maps:get(vsn, Node, undefined),
+    AppVsn = maps:get(app_vsn, Node, undefined),
+    AppVersion = gordon_uapp:decode_app_vsn(AppVsn),
+    io:format("Match firmware, ~p\n",
+	      [{Product,Vsn,AppVersion,AppVersion}]),
+    match_uapp_firmware_(Product,Vsn,AppVersion,State#state.firmware).
+
+match_uapp_firmware_(Product,Vsn={Major,Minor},AppVersion,
+		     [UApp={uapp,{Product,_Variant,Major,Minor},Banks}|Fs]) ->
+    case match_uapp_vsn(AppVersion, Banks) of
+	true -> UApp;
+	false -> match_uapp_firmware_(Product,Vsn,AppVersion,Fs)
+    end;
+match_uapp_firmware_(Product,Vsn,AppVersion,[_UApp|Fs]) ->
+    match_uapp_firmware_(Product,Vsn,AppVersion,Fs);
+match_uapp_firmware_(_Product,_Vsn,_AppVersion,[]) ->
+    false.
+
+match_uapp_vsn(AppVersion, [{banks,Match,_Bs}|Banks]) ->
+    case proplists:get_value(version,Match) of
+	undefined -> 
+	    match_uapp_vsn(AppVersion,Banks);
+	Version ->
+	    io:format("Node AppVersion=~p, File Version=~p\n",
+		      [AppVersion,Version]),
+	    if AppVersion =:= undefined;
+	       Version > AppVersion -> true;
+	       true -> match_uapp_vsn(AppVersion, Banks)
+	    end
+    end;
+match_uapp_vsn(_AppVersion, []) ->
+    false.
+    
+
+action_sdo(State, Status, Index, Si, Value) ->
+    case find_node_by_pos(State#state.selected_pos,State#state.nodes) of
+	false ->
+	    State;
+	Node ->
 	    CurrentStatus = maps:get(status,Node,undefined),
 	    Serial = maps:get(serial,Node,0),
 	    %% io:format("Serial = ~w, Status = ~w\n", [Serial, Status]),
@@ -495,7 +586,7 @@ controlZone_setup(_XCobId,_State) ->
 %%
 event(Signal,ID,Env) ->
     %% just send it as info message to access
-    io:format("Got event callback ~p\n", [{Signal,ID,Env}]),
+    ?dbg("Got event callback ~p\n", [{Signal,ID,Env}]),
     ?SERVER ! {Signal,ID,Env}.
 
 select_row(Row) ->
@@ -504,16 +595,16 @@ select_row(Row) ->
 
 deselect_row(undefined, State) ->
     State;
-deselect_row(Node, State) ->
-    Row = maps:get(pos,Node,0),
+deselect_row(Pos, State) ->
     case State#state.selected_id of
-	undefined -> ok;
+	undefined -> 
+	    ok;
 	PDx ->
-	    RowID = "nodes.r"++integer_to_list(Row),
+	    RowID = "nodes.r"++integer_to_list(Pos),
 	    epxy:set(PDx,[{hidden,all},{disabled,all}]),
 	    epxy:set(RowID,[{hidden,true}])
     end,
-    State#state { selected=undefined, selected_id=undefined }.
+    State#state { selected_pos=undefined, selected_id=undefined }.
 
 %% Node table
 %% +------+---+----------+---+--------+
@@ -645,10 +736,10 @@ bridgeZone(X,Y,_W,_H) ->
     X1 = XGap,
     ID = "pdb",
 
-    {_,Yn,W0,H0} = tagged_text("pdb.app_vsn", "Version", X1, Y0),
+    {_,Y1,_W0,H0} = tagged_text("pdb.app_vsn", "Version", X1, Y0),
 
     %% Aout x 2 (row=Y1,column X1)
-    {_,Y2,W1,H1} = aout_group("pdb.aout", 5, 6, X1, Yn+YGap),
+    {_,Y2,W1,H1} = aout_group("pdb.aout", 5, 6, X1, Y1+YGap),
 
     %% Ain x 4 (row=Y2,column=X1)
     {_,Y3,W2,H2} = ain_group("pdb.ain", 37, 40, X1, Y2+YGap),
@@ -672,44 +763,49 @@ bridgeZone(X,Y,_W,_H) ->
     ok.
 
 ioZone(X,Y,_W,_H) ->
-    XGap = 10,
-    YGap = 10,
-    Y1 = YGap,
+    XGap = 12,
+    YGap = ?GROUP_FONT_SIZE,
+    Y0 = YGap,
     X1 = XGap,
     X2 = X1+64,
     ID = "pdi",
 
+    {_,Yn,_W0,H0} = tagged_text("pdi.app_vsn", "Version", X1, Y0),
+    Y1 = Yn,
+
     %% Din x 12 (row Y3,column=X1) support iozone24?
-    {_,Y2,W2,H2} = din_group("pdi.din", 33, 44, X1, Y1),
+    {_,Y2,W2,H2} = din_group("pdi.din", 33, 44, X1, Y1+YGap),
 
     %% Ain x 4 (row=Y1,column=X1)
     {_,Y3,W3,H3} = ain_group("pdi.ain", 65, 68, X1, Y2+YGap),
 
     %% Dout x 8 (row Y3,column=X2)
-    {_,_,W4,H4} = dout_group("pdi.dout", 1, 8, X2, Y1),
+    {_,_,W4,H4} = dout_group("pdi.dout", 1, 8, X2, Y1+YGap),
 
     {W6,H6} = add_buttons(ID, X1, Y3+YGap),
 
     Wt = XGap+max(W2,max(W3+W4+XGap,W6))+XGap,
-    Ht = YGap+max(H2+H3+YGap,H4)+YGap+H6+2*YGap,
+    Ht = YGap+H0+YGap+max(H2+H3+YGap,H4)+YGap+H6+2*YGap,
 
     group_rectangle(ID,"ioZone",X,Y,Wt,Ht,all),
 
     ok.
 
 powerZone(X,Y,_W,_H) ->
-    XGap = 10,
-    YGap = 10,
-    Y1 = YGap,
+    XGap = 12,
+    YGap = ?GROUP_FONT_SIZE,
+    Y0 = YGap,
     X1 = XGap,
     ID = "pds",
 
+    {_,Y1,_W0,H0} = tagged_text("pds.app_vsn", "Version", X1, Y0),
+
     %% Ain x 8 (row=Y1,column=X1)
-    {_,_Y3,W2,H2} = ain_group("pds.ain", 1, 8, X1, Y1),
+    {_,_Y3,W2,H2} = ain_group("pds.ain", 1, 8, X1, Y1+YGap),
 
     X2 = X1+W2+XGap,
     %% Pout x 8 (row Y1,column=X2)
-    {_,_,W3,H3} = pout_group("pds.pout", 1, 8, X2, Y1),
+    {_,_,W3,H3} = pout_group("pds.pout", 1, 8, X2, Y1+YGap),
 
     X3 = X2+W3+XGap,
     %% Aload x 8 (row=Y1,column=X3)
@@ -722,7 +818,7 @@ powerZone(X,Y,_W,_H) ->
     {W6,H6} = add_buttons(ID, X1, Y5),
 
     Wt = XGap+max(W2+XGap+W3+XGap+W4,W6)+XGap,
-    Ht = YGap+max(H2,max(H3,H4))+YGap+H6+YGap,
+    Ht = YGap+H0+YGap+max(H2,max(H3,H4))+YGap+H6+YGap,
 
     group_rectangle(ID,"powerZone",X,Y,Wt,Ht,all),
 
@@ -1072,15 +1168,15 @@ pdo1_tx(CobID,Data,State) ->
 %% request to node
 sdo_rx(CobID,Bin,State) ->
     case Bin of
-	?ma_ccs_initiate_download_request(N,E,S,Index,SubInd,Data) when 
+	?ma_ccs_initiate_download_request(N,E,S,_Index,_SubInd,Data) when 
 	      E =:= 1->
-	    Value = sdo_value(S,N,Data),
+	    _Value = sdo_value(S,N,Data),
 	    ?dbg("sdo_rx: CobID=~s, SET index=~w, si=~w, value=~w\n", 
-		 [integer_to_list(CobID,16), Index,SubInd,Value]);
+		 [integer_to_list(CobID,16), _Index,_SubInd,_Value]);
 
-	?ma_ccs_initiate_upload_request(Index,SubInd) ->
+	?ma_ccs_initiate_upload_request(_Index,_SubInd) ->
 	    ?dbg("sdo_rx: CobID=~s, GET index=~w, si=~w\n", 
-		 [integer_to_list(CobID,16), Index,SubInd]);
+		 [integer_to_list(CobID,16),_Index,_SubInd]);
 
 	_ ->
 	    ?warn("sdo_rx: CobID=~s, only  expedited mode supported\n",
@@ -1176,16 +1272,20 @@ sdo_value(1,3,<<Value:8/little,_:24>>) -> Value.
 node_booted(_CobID, Serial, State) ->
     ?dbg("Node ~s booted\n", [integer_to_list(Serial,16)]),
     Nodes = set_status_by_serial(Serial, boot, State#state.nodes),
-    io:format("Nodes = ~p\n", [Nodes]),
+    io:format("hold=~w, Nodes = ~p\n", [State#state.hold_mode, Nodes]),
     if State#state.hold_mode ->
 	    XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
 	    WDT = 0,
 	    co_sdo_cli:send_sdo_set(XCobId, ?INDEX_UBOOT_HOLD, 0, WDT),
-	    {noreply, State#state { nodes=Nodes, 
-				    sdo_request={?INDEX_UBOOT_HOLD, 0},
-				    hold_mode=false }};
+	    State1 = State#state { nodes=Nodes, 
+				   sdo_request={?INDEX_UBOOT_HOLD, 0},
+				   hold_mode=false },
+	    State2 = refresh_node_state(State1),
+	    {noreply, State2};
        true ->
-	    {noreply, State#state { nodes=Nodes }}
+	    State1 = State#state { nodes=Nodes },
+	    State2 = refresh_node_state(State1),
+	    {noreply,State2}
     end.
 
 
@@ -1200,7 +1300,9 @@ node_started(_CobId, Serial, State) ->
 	      co_sdo_cli:send_sdo_get(XCobId, ?IX_IDENTITY_OBJECT, ?SI_IDENTITY_PRODUCT)
 	      %% ...
       end),
-    {noreply, State#state { nodes=Nodes }}.
+    State1 = State#state { nodes=Nodes },
+    State2 = refresh_node_state(State1),
+    {noreply,State2}.
 
 node_running(_CobId, Serial, State) ->
     ?dbg("Node ~6.16.0B running\n", [Serial]),
@@ -1209,7 +1311,7 @@ node_running(_CobId, Serial, State) ->
 	    spawn(
 	      fun() ->
 		      XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
-		      io:format("XCobId = ~8.16.0B\n", [XCobId]),
+		      ?dbg("XCobId = ~8.16.0B\n", [XCobId]),
 		      co_sdo_cli:send_sdo_get(XCobId, ?INDEX_ID, 0),
 		      co_sdo_cli:send_sdo_get(XCobId, ?IX_IDENTITY_OBJECT,
 					      ?SI_IDENTITY_PRODUCT),
@@ -1222,7 +1324,7 @@ node_running(_CobId, Serial, State) ->
 		      end
 	      end),
 	    {noreply, State};
-	{value,_Node} ->
+	_Node ->
 	    %% Node is present in node list
 	    %% XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
 	    %% send_pdo1_tx(0, ?MSG_REFRESH, 0, 0)
@@ -1367,11 +1469,11 @@ node_data(Index, Si, Value, State) ->
 	    end;
 
 	?MSG_OUTPUT_STATE ->
-	    OnOff = (Value bsr 24) band 16#ff,
-	    OutSt = (Value bsr 16) band 16#ff,
-	    Duty  = Value band 16#ffff,
+	    _OnOff = (Value bsr 24) band 16#ff,
+	    _OutSt = (Value bsr 16) band 16#ff,
+	    _Duty  = Value band 16#ffff,
 	    ?dbg("MSG_OUTPUT_STATE: [~s], si=~w,on=~w,state=~w,duty=~w\n", 
-		 [State#state.selected_id,Si,OnOff,OutSt,Duty]),
+		 [State#state.selected_id,Si,_OnOff,_OutSt,_Duty]),
 	    case Si of
 		%% bridge zone: Pout=1-4, Aout =5-6, Dout=7-10
 		%% ioZone:      Dout=1-8
@@ -1399,7 +1501,7 @@ set_status_by_serial(Serial, Status, Ns) ->
 	false ->
 	    Pos = length(Ns)+1,
 	    set_text(status,Pos,Status),
-	    set_text(serial,Pos,serial_to_text(Serial)),
+	    set_text(serial,Pos,Serial),
 	    Node = #{ pos => Pos, serial => Serial, status => Status },
 	    [ Node | Ns]
     end.
@@ -1411,9 +1513,9 @@ set_value_by_cobid(CobId,Index,SubInd,Value,State) ->
 	?IX_IDENTITY_OBJECT when SubInd =:= ?SI_IDENTITY_PRODUCT ->
 	    Product = (Value bsr 16) band 16#ff,
 	    %% _Variant = (Value bsr 24) band 16#ff,
-	    Vsn = integer_to_list((Value bsr 8) band 16#ff) ++ "." ++
-		integer_to_list(Value band 16#ff),
-	    State1 = set_by_cobid(CobId,vsn,Vsn,State),
+	    Major = (Value bsr 8) band 16#ff,
+	    Minor = Value band 16#ff,
+	    State1 = set_by_cobid(CobId,vsn,{Major,Minor},State),
 	    case Product of
 		1 ->
 		    set_by_cobid(CobId,product,powerZone,State1);
@@ -1435,6 +1537,11 @@ set_value_by_cobid(CobId,Index,SubInd,Value,State) ->
     end.
 
 set_by_cobid(CobID,Key,Value,State) ->
+    State1 = set_by_cobid_(CobID,Key,Value,State),
+    refresh_node_state(State1).
+
+set_by_cobid_(CobID,Key,Value,State) ->
+    io:format("set_by_cobid: key=~p, value=~p\n", [Key,Value]),
     case ?is_cobid_extended(CobID) of
 	true ->
 	    Serial = ?XNODE_ID(CobID),
@@ -1442,12 +1549,12 @@ set_by_cobid(CobID,Key,Value,State) ->
 	    case take_node_by_serial(Serial, Ns) of
 		false ->
 		    Pos = length(Ns)+1,
-		    set_text(serial,Pos,serial_to_text(Serial)),
-		    set_text(Key,Pos,to_text(Value)),
+		    set_text(serial,Pos,Serial),
+		    set_text(Key,Pos,Value),
 		    N = #{ pos=>Pos, serial=>Serial, Key=>Value },
 		    State#state { nodes=[N|Ns]};
 		{value,N=#{ pos := Pos},Ns1} ->
-		    set_text(Key,Pos,to_text(Value)),
+		    set_text(Key,Pos,Value),
 		    N1 = N#{ Key => Value },
 		    State#state { nodes=[N1|Ns1]}
 	    end;
@@ -1457,20 +1564,16 @@ set_by_cobid(CobID,Key,Value,State) ->
 	    case take_node_by_id(ID, Ns) of
 		false ->
 		    Pos = length(Ns)+1,
-		    set_text(id,Pos,to_text(ID)),
-		    set_text(Key,Pos,to_text(Value)),
+		    set_text(id,Pos,ID),
+		    set_text(Key,Pos,Value),
 		    N = #{ pos=>Pos, id=>ID, Key=>Value },
 		    State#state { nodes=[N|Ns]};
 		{value,N=#{ pos := Pos},Ns1} ->
-		    set_text(Key,Pos,to_text(Value)),
+		    set_text(Key,Pos,Value),
 		    N1 = N#{ Key => Value },
 		    State#state { nodes=[N1|Ns1]}
 	    end
     end.
-
-to_text(Int) when is_integer(Int) -> integer_to_list(Int);
-to_text(Text) when is_atom(Text) -> Text;
-to_text(Text) when is_list(Text) -> Text.
 
 %% set text value in nodes table
 %% nodes.r<pos>.<key>
@@ -1478,11 +1581,31 @@ set_text(Key,Pos,Value) ->
     case is_node_item(Key) of
 	true ->
 	    ID = "nodes.r"++integer_to_list(Pos)++"."++atom_to_list(Key),
-	    io:format("set_text: id=~s, value=~s\n", [ID,Value]),
-	    epxy:set(ID,[{text,Value}]);
+	    ?dbg("set_text: id=~s, value=~p\n", [ID,Value]),
+	    epxy:set(ID,[{text,format_value(Key,Value)}]);
 	false ->
 	    ok
     end.
+
+format_value(serial,Value) -> 
+    tl(integer_to_list(16#1000000+Value, 16));
+format_value(vsn,{Major,Minor}) ->
+    integer_to_list(Major)++"."++integer_to_list(Minor);
+format_value(app_vsn,Value) ->
+    case Value of
+	16#00000000 -> "zero";
+	16#2F5EBD7A -> "empty";
+	16#FFFFFFFF -> "none";
+	_ ->
+	    {{Year,Mon,Day},{_H,_M,_S}} = 
+		calendar:gregorian_seconds_to_datetime(Value+62167219200),
+	    lists:flatten(io_lib:format("~4..0w-~2..0w-~2..0w", 
+					[Year,Mon,Day]))
+    end;
+format_value(_Key,Int) when is_integer(Int) -> integer_to_list(Int);
+format_value(_Key,Text) when is_atom(Text) -> Text;
+format_value(_Key,Text) when is_list(Text) -> Text.
+
 
 is_node_item(serial) -> true;
 is_node_item(id) -> true;
@@ -1491,16 +1614,7 @@ is_node_item(vsn) -> true;
 is_node_item(status) -> true;
 is_node_item(_) -> false.
 
-serial_to_text(Serial) ->
-    tl(integer_to_list(16#1000000 + Serial, 16)).
 
-version_to_text(16#00000000) -> "zero";
-version_to_text(16#2F5EBD7A) -> "empty";
-version_to_text(16#FFFFFFFF) -> "none";
-version_to_text(Vsn) ->
-    {{Year,Mon,Day},{_H,_M,_S}} = 
-	calendar:gregorian_seconds_to_datetime(Vsn+62167219200),
-    lists:flatten(io_lib:format("~4..0w-~2..0w-~2..0w", [Year,Mon,Day])).
 
 %% find node with Serial
 take_node_by_serial(Serial, Ns) ->
@@ -1524,17 +1638,15 @@ take_node_by_id(Id, [Node|Ns], Ms) ->
 take_node_by_id(_Id, [], _Ms) ->
     false.
 
-find_node_by_pos(Pos, Ns) ->
-    find_node_by_key(pos, Pos, Ns).
 
-find_node_by_serial(Serial, Ns) ->
-    find_node_by_key(serial, Serial, Ns).
+find_node_by_pos(Pos, Ns) ->  find_node_by_key(pos, Pos, Ns).
+find_node_by_serial(Serial, Ns) -> find_node_by_key(serial, Serial, Ns).
 
 %% find node with key and Value
 find_node_by_key(Key,Value,[Node|Ns]) ->
     case Node of
 	#{ Key := Value} ->
-	    {value,Node};
+	    Node;
 	_ ->
 	    find_node_by_key(Key,Value,Ns)
     end;
@@ -1555,8 +1667,8 @@ load_firm(Dir,[F|Fs],Acc) ->
     File = filename:join(Dir,F),
     try gordon_uapp:load(File) of
 	{ok, Uapp} ->
-	    load_firm(Dir,Fs,[Uapp|Acc]);
-	Error ->
+	    load_firm(Dir,Fs,Uapp++Acc);
+	_Error ->
 	    load_firm_hex(Dir,Fs,File,Acc)
     catch
 	error:_ ->
@@ -1569,9 +1681,22 @@ load_firm_hex(Dir,Fs,File,Acc) ->
     try elpcisp_ihex:load(File) of
 	{ok,Hex} ->
 	    load_firm(Dir,Fs,[{ihex,Hex}|Acc]);
-	Error ->
+	_Error ->
 	    load_firm(Dir,Fs,Acc)
     catch
 	error:_ ->
 	    load_firm(Dir,Fs,Acc)
     end.
+
+firmware_size([{banks,_Match,B}|_]) ->
+    banks_size(B);
+firmware_size(SegmentList=[{Addr,Seg}|_]) when is_integer(Addr),
+					       is_binary(Seg) ->
+    banks_size(SegmentList);
+firmware_size([]) ->
+    0.
+
+banks_size(Bs) ->
+    lists:sum([byte_size(Segment) || {_Addr,Segment} <- Bs]).
+
+    

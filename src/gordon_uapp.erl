@@ -10,6 +10,7 @@
 
 -module(gordon_uapp).
 -export([is_uapp/1, load/1]).
+-export([decode_app_vsn/1]).
 
 -define(UAPP_MAGIC,   <<"UAPP">>).
 -define(UAPP_PRODUCT, <<"UPRD">>).
@@ -129,7 +130,7 @@ data(Es,Ds) ->
 decode([{?UAPP_PRODUCT,Data}|Es], Acc) ->
     <<Variant:8,Product:8,Major:8,Minor:8>> = Data,
     P = case Product of
-	    ?PRODUCT_PDS -> powerZonze;
+	    ?PRODUCT_PDS -> powerZone;
 	    ?PRODUCT_PDC -> controlZone;
 	    ?PRODUCT_PDD -> displayZone;
 	    ?PRODUCT_PDI -> ioZone;
@@ -155,7 +156,7 @@ decode([{?UAPP_PRODUCT,Data}|Es], Acc) ->
 	end,
     decode(Es, [{product,{P,V,Major,Minor}}|Acc]);
 decode([{?UAPP_VERSION, <<Vsn:32>>}|Es], Acc) ->
-    DateTime = calendar:gregorian_seconds_to_datetime(Vsn+62167219200),
+    DateTime = decode_app_vsn(Vsn),
     decode(Es, [{version,DateTime}|Acc]);
 decode([{?UAPP_SERIAL, <<Serial:32>>}|Es], Acc) ->
     decode(Es, [{serial,Serial}|Acc]);
@@ -165,3 +166,7 @@ decode([{?UAPP_BIN, Data}|Es], Acc) ->
     decode(Es, [{data,Data}|Acc]);
 decode([], Acc) ->
     Acc.
+
+decode_app_vsn(undefined) -> undefined;
+decode_app_vsn(Vsn) ->
+    calendar:gregorian_seconds_to_datetime(Vsn+62167219200).
