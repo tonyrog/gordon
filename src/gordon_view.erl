@@ -64,6 +64,23 @@
 -define(BUTTON_WIDTH, 64).
 -define(BUTTON_HEIGHT, 15).
 
+-define(TYPE_NONE,       16#00).
+-define(TYPE_BACKLIGHT,  16#81).
+-define(TYPE_BLOCK,       16#83).
+-define(TYPE_ALARM,       16#84).
+-define(TYPE_ONOFF,       16#01).
+-define(TYPE_DIMMER,      16#02).
+-define(TYPE_INTERVAL,    16#03).
+-define(TYPE_MOMENT,      16#04).
+-define(TYPE_PULSE,       16#05).
+-define(TYPE_EXTERNAL,    16#06).
+-define(TYPE_ALWAYSON,    16#07).
+-define(TYPE_OUT_ACTIVE,  16#09).
+-define(TYPE_OUT_ALARM,   16#0A).
+-define(TYPE_OUT_BACKLIGHT, 16#0B).
+-define(TYPE_DMX,         16#08).
+-define(TYPE_INPUT,       16#FF).
+
 -define(dbg(F,A), io:format((F),(A))).
 %%-define(dbg(F,A), ok).
 -define(warn(F,A), io:format((F),(A))).
@@ -458,9 +475,12 @@ refresh_node_state(State) ->
 	Node -> refresh_node_state(Node,State)
     end.
 
+refresh_node_state(Node, State) when 
+      State#state.selected_id =:= undefined ->
+    State;
 refresh_node_state(Node, State) ->
-    AppVsn = maps:get(app_vsn,Node,0),
     PDx = State#state.selected_id,
+    AppVsn = maps:get(app_vsn,Node,0),
     epxy:set(PDx++".app_vsn", [{text,format_value(app_vsn,AppVsn)}]),
     case maps:get(status,Node,undefined) of
 	undefined -> 
@@ -543,6 +563,17 @@ action_sdo(State, Status, Index, Si, Value) ->
 	    end
     end.
 
+
+-define(OUTPUT_FLAG_OUTACT,      16#0020).
+-define(OUTPUT_FLAG_ANLOAD,      16#0800).
+-define(OUTPUT_FLAG_VALUE,       16#1000).
+
+-define(INPUT_ACTIVE,            16#0001).
+-define(INPUT_ANALOG,            16#0002).
+-define(INPUT_DIGITAL,           16#0004).
+-define(INPUT_ENCODER,           16#0008).
+
+
 %%
 %% powerZone test setup
 %% set output-type:1-8 dimmer
@@ -551,8 +582,17 @@ action_sdo(State, Status, Index, Si, Value) ->
 %% set input-flags:32 active
 %% set input-out:32 1..8
 %%
-powerZone_setup(_XCobId,_State) ->
-    ok.
+
+powerZone_setup(Nid,State) ->
+    co_sdo_cli:set_batch([{Nid,?INDEX_OUTPUT_TYPE,{1,8},?TYPE_DIMMER},
+			  {Nid,?INDEX_OUTPUT_STEPMAX,{1,8},255},
+			  {Nid,?INDEX_OUTPUT_FLAGS,{1,8},
+			   ?OUTPUT_FLAG_ANLOAD bor ?OUTPUT_FLAG_OUTACT},
+			  {Nid,?INDEX_INPUT_FLAGS,32,?INPUT_ACTIVE},
+			  {Nid,?INDEX_INPUT_OUT,32,16#ff}
+			 ],1000),
+    {noreply,State}.
+
 %%
 %% bridgeZone test setup
 %% set output-type:1-6 dimmer
@@ -562,24 +602,39 @@ powerZone_setup(_XCobId,_State) ->
 %% set input-flags:32 active
 %% set input-out:32 1..10
 %%
-bridgeZone_setup(_XCobId, _State) ->
-    ok.
+bridgeZone_setup(Nid, State) ->
+    co_sdo_cli:set_batch([{Nid,?INDEX_OUTPUT_TYPE,{1,6},?TYPE_DIMMER},
+			  {Nid,?INDEX_OUTPUT_TYPE,{7,10},?TYPE_ONOFF},
+			  {Nid,?INDEX_OUTPUT_STEPMAX,{1,6},255},
+			  {Nid,?INDEX_OUTPUT_FLAGS,{1,10},
+			   ?OUTPUT_FLAG_OUTACT},
+			  {Nid,?INDEX_INPUT_FLAGS,32,?INPUT_ACTIVE},
+			  {Nid,?INDEX_INPUT_OUT,32,16#3ff}
+			 ],1000),
+    {noreply,State}.
 
 %%
 %% ioZone test setup
 %% set output-type:1-8 onoff
-%% set output-flags:7-10 outact
+%% set output-flags:1-8 outact
 %% set input-flags:32 active
 %% set input-out:32 1..8
 %%
-ioZone_setup(_XCobId,_State) ->
-    ok.
+ioZone_setup(Nid,State) ->
+    co_sdo_cli:set_batch([{Nid,?INDEX_OUTPUT_TYPE,{1,8},?TYPE_ONOFF},
+			  {Nid,?INDEX_OUTPUT_FLAGS,{1,8},
+			   ?OUTPUT_FLAG_OUTACT},
+			  {Nid,?INDEX_INPUT_FLAGS,32,?INPUT_ACTIVE},
+			  {Nid,?INDEX_INPUT_OUT,32,16#ff}
+			 ],1000),
+    {noreply,State}.
+
 
 %%
 %% controlZone test setup
 %%
-controlZone_setup(_XCobId,_State) ->
-    ok.
+controlZone_setup(_Nid,State) ->
+    {noreply,State}.
 
 %%
 %% Event callback from epxy
@@ -809,9 +864,9 @@ powerZone(X,Y,_W,_H) ->
 
     X3 = X2+W3+XGap,
     %% Aload x 8 (row=Y1,column=X3)
-    {_,_Y4,W4,H4} = aload_group("pds.aload", 33, 40, X3, Y1),
+    {_,_Y4,W4,H4} = aload_group("pds.aload", 33, 40, X3, Y1+YGap),
 
-    H5 = max(H2,max(H3,H4)),
+    H5 = H0+YGap+max(H2,max(H3,H4)),
 
     Y5 = Y1 + H5 + YGap,
 
