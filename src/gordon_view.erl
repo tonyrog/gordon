@@ -21,6 +21,8 @@
 
 -export([event/3]).  %% fixme better unique callback name
 
+-compile(export_all).
+
 %%-export([serial_flash_bootloader/0]).
 %%-export([can_flash_bootloader/1]).
 %%-export([can_flash_application/1, can_flash_application/2]).
@@ -40,20 +42,29 @@
 	  selected_eff=0,  %% Selected node
 	  selected_sff=0,  %% Selected node
 	  selected_id,     %% "pds"/"pdb"/"pdi"/"pdc"
-	  table_x_offset=0,
-	  table_y_offset=0,
+	  sdo_request,     %% current outstanding sdo_request
+	  sdo_error,       %% last sdo_error
 	  row_height = 1,  %% height of row selection area
+	  firmware = [],   %% list of available firmware for upgrade
 	  nodes = [] %% list of node maps
 	}).
 
--define(TEXT_CELL_FONT_SIZE, 14).
--define(DIN_FONT_SIZE, 12).
--define(DOUT_FONT_SIZE, 12).
--define(AIN_FONT_SIZE, 12).
--define(BUTTON_FONT_SIZE, 12).
--define(GROUP_FONT_SIZE, 10).
+-define(TEXT_CELL_FONT_SIZE, 18).
+-define(DIN_FONT_SIZE, 14).
+-define(DOUT_FONT_SIZE, 14).
+-define(AIN_FONT_SIZE, 14).
+-define(ALOAD_FONT_SIZE, 14).
+-define(BUTTON_FONT_SIZE, 14).
+-define(ONOFF_FONT_SIZE, 14).
+-define(GROUP_FONT_SIZE, 12).
+-define(SLIDER_WIDTH,  100).
+-define(SLIDER_HEIGHT, 8).
+-define(ONOFF_WIDTH, 40).
+-define(BUTTON_WIDTH, 64).
+-define(BUTTON_HEIGHT, 15).
 
--define(dbg(F,A), io:format((F),(A))).
+%% -define(dbg(F,A), io:format((F),(A))).
+-define(dbg(F,A), ok).
 -define(warn(F,A), io:format((F),(A))).
 -define(error(F,A), io:format((F),(A))).
 
@@ -134,10 +145,9 @@ init(Options) ->
     %% request response from all nodes
     send_pdo1_tx(0, ?MSG_ECHO_REQUEST, 0, 0),
 
-    {ok, #state{ row_height = RowHeight, 
-		 table_x_offset = XOffset,
-		 table_y_offset = YOffset
-	       }}.
+    Firmware = load_firmware(),
+
+    {ok, #state{ row_height = RowHeight, firmware = Firmware }}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -182,6 +192,7 @@ handle_cast(_Msg, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_info(Frame, State) when is_record(Frame,can_frame) ->
+    ?dbg("Frame = ~p\n", [Frame]),
     CanID = Frame#can_frame.id,
     CobID = ?CANID_TO_COBID(CanID),
     {Func,_ID} = if ?is_can_id_eff(CanID) ->
@@ -194,7 +205,7 @@ handle_info(Frame, State) when is_record(Frame,can_frame) ->
 	?SDO_TX   -> sdo_tx(CobID, Frame#can_frame.data,State);
 	?SDO_RX   -> sdo_rx(CobID, Frame#can_frame.data,State);
 	_ ->
-	    io:format("Frame = ~p\n", [Frame]),
+	    ?dbg("Frame = ~p\n", [Frame]),
 	    {noreply, State}
     end;
 handle_info({event,"screen",[{closed,true}]}, State) ->
@@ -218,6 +229,7 @@ handle_info({select,"nodes.r"++RTxt,[{press,1},{x,_X},{y,_Y}|_]},State) ->
 		      0 -> 0;
 		      M -> ?COB_ID(?PDO1_TX,M)
 		  end,
+	    AppVsn = maps:get(app_vsn,Node,0),
 	    PDx = case maps:get(product,Node,undefined) of
 		      undefined -> undefined;
 		      powerZone -> "pds";
@@ -235,6 +247,13 @@ handle_info({select,"nodes.r"++RTxt,[{press,1},{x,_X},{y,_Y}|_]},State) ->
 				  },
 	    select_row(R),
 	    epxy:set(PDx,[{hidden,false},{disabled,false}]),
+	    %% FIXME: update button status according to state
+	    %%  upgrade iff state=boot and firmware is available and correct
+	    %%  factory/save/hold iff state=up
+	    %%  go state=boot
+	    %%  setup state=up
+	    %%
+	    epxy:set(PDx++".app_vsn", [{text,version_to_text(AppVsn)}]),
 	    io:format("select row=~w, eff=~8.16.0B, sff=~3.16.0B id=~s\n",
 		      [R, EFF, SFF, PDx]),
 	    send_pdo1_tx(0, ?MSG_REFRESH, 0, 0),
@@ -285,29 +304,71 @@ handle_info({switch,ID,[{value,Value}]},State) ->
     end,
     {noreply, State};
 
+%% send a reset and set hold mode
 handle_info({button,[_,_,_|".hold"],[{value,1}]},State) ->
-    action_hold(State);
+    Node = State#state.selected,
+    if Node =:= undefined ->
+	    {noreply,State};
+       true ->
+	    Serial = maps:get(serial,Node,0),
+	    send_pdo1_tx(0, ?MSG_RESET, 0, Serial),
+	    {noreply,State#state{hold_mode = true }}
+    end;
 
+%% leave boot mode
 handle_info({button,[_,_,_|".go"],[{value,1}]},State) ->
-    action_go(State);
+    WDT = 1,
+    {noreply,action_sdo(State,boot,?INDEX_UBOOT_GO,0,WDT)};
 
 handle_info({button,[_,_,_|".upgrade"],[{value,1}]},State) ->
-    action_upgrade(State);
+    %% locate firmware image given selected product
+    %% check that firmware is an upgrade or first firmware
+    %% must be an uapp.
+    %% start process disable all input (except flash dialog)
+    %% show progress remove flash dialog and enable input
+    {noreply,State};
 
+%% reset the node
 handle_info({button,[_,_,_|".reset"],[{value,1}]},State) ->
-    action_reset(State);
+    %% send a reset and set hold mode
+    Node = State#state.selected,
+    if Node =:= undefined ->
+	    {noreply,State};
+       true ->
+	    Serial = maps:get(serial,Node,0),
+	    send_pdo1_tx(0, ?MSG_RESET, 0, Serial),
+	    {noreply,State#state{hold_mode = false }}
+    end;
 
 handle_info({button,[_,_,_|".setup"],[{value,1}]},State) ->
-    action_setup(State);
+    Node = State#state.selected,
+    if Node =:= undefined ->
+	    {noreply,State};
+       true ->
+	    Status = maps:get(status,Node,undefined),
+	    Serial = maps:get(serial,Node,0),
+	    if Status =:= up ->
+		    XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
+		    case State#state.selected_id of
+			"pdb" -> bridgeZone_setup(XCobId,State);
+			"pds" -> powerZone_setup(XCobId,State);
+			"pdi" -> ioZone_setup(XCobId,State);
+			"pdc" -> controlZone_setup(XCobId,State);
+			_ -> {noreply,State}
+		    end;
+	       true ->
+		    {noreply,State}
+	    end
+    end;
 
 handle_info({button,[_,_,_|".factory"],[{value,1}]},State) ->
-    action_factory(State);
+    {noreply,action_sdo(State,up,?IX_RESTORE_DEFAULT_PARAMETERS,4,<<"daol">>)};
 
 handle_info({button,[_,_,_|".save"],[{value,1}]},State) ->
-    action_save(State);
+    {noreply,action_sdo(State,up,?IX_STORE_PARAMETERS,1,<<"evas">>)};
 
 handle_info({button,[_,_,_|".restore"],[{value,1}]},State) ->
-    action_restore(State);
+    {noreply, action_sdo(State,up,?IX_RESTORE_DEFAULT_PARAMETERS,1,<<"daol">>)};
 
 handle_info({button,_ID,[{value,0}]},State) ->
     %% ignore button release
@@ -373,157 +434,60 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-%% send a reset and set hold mode
-action_hold(State) ->
+action_sdo(State, Status, Index, Si, Value) ->
     Node = State#state.selected,
+    io:format("Node selected = ~p\n", [Node]),
     if Node =:= undefined ->
-	    {noreply,State};
+	    State;
        true ->
-	    Serial = maps:get(serial,Node,0),
-	    send_pdo1_tx(0, ?MSG_RESET, 0, Serial),
-	    {noreply,State#state{hold_mode = true }}
-    end.
-
-%% leave boot mode
-action_go(State) ->
-    Node = State#state.selected,
-    if Node =:= undefined ->
-	    {noreply,State};
-       true ->
-	    Status = maps:get(status,Node,undefined),
+	    CurrentStatus = maps:get(status,Node,undefined),
 	    Serial = maps:get(serial,Node,0),
 	    %% io:format("Serial = ~w, Status = ~w\n", [Serial, Status]),
-	    if Status =:= boot ->
+	    if CurrentStatus =:= Status ->
 		    XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
-		    WDT = 1,
-		    send_sdo_set(XCobId, ?INDEX_UBOOT_GO, 0, WDT),
-		    {noreply,State};
+		    co_sdo_cli:send_sdo_set(XCobId, Index, Si, Value),
+		    State#state { sdo_request = { Index, Si }};
 	       true ->
-		    {noreply,State}
+		    State
 	    end
     end.
 
-action_upgrade(State) ->
-    {noreply,State}.
-
-%% reset the node
-action_reset(State) ->
-    %% send a reset and set hold mode
-    Node = State#state.selected,
-    if Node =:= undefined ->
-	    {noreply,State};
-       true ->
-	    Serial = maps:get(serial,Node,0),
-	    send_pdo1_tx(0, ?MSG_RESET, 0, Serial),
-	    {noreply,State#state{hold_mode = false }}
-    end.
-
-%% Setup node for testing
-action_setup(State) ->
-    Node = State#state.selected,
-    if Node =:= undefined ->
-	    {noreply,State};
-       true ->
-	    Status = maps:get(status,Node,undefined),
-	    Serial = maps:get(serial,Node,0),
-	    if Status =:= up ->
-		    XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
-		    case State#state.selected_id of
-			"pdb" -> bridgeZone_setup(XCobId,State);
-			"pds" -> powerZone_setup(XCobId,State);
-			"pdi" -> ioZone_setup(XCobId,State);
-			"pdc" -> controlZone_setup(XCobId,State);
-			_ -> {noreply,State}
-		    end;
-	       true ->
-		    {noreply,State}
-	    end
-    end.
-
-%% set factory default value
-action_factory(State) ->
-    Node = State#state.selected,
-    if Node =:= undefined ->
-	    {noreply,State};
-       true ->
-	    Status = maps:get(status,Node,undefined),
-	    Serial = maps:get(serial,Node,0),
-	    %% io:format("Serial = ~w, Status = ~w\n", [Serial, Status]),
-	    if Status =:= up ->
-		    XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
-		    send_sdo_set(XCobId, 
-				 ?IX_RESTORE_DEFAULT_PARAMETERS,
-				 4,<<"daol">>),
-		    %% FIXME: wait for restore to complete!
-		    {noreply,State};
-	       true ->
-		    {noreply,State}
-	    end
-    end.
-
-%% save current paramters
-action_save(State) ->
-    Node = State#state.selected,
-    if Node =:= undefined ->
-	    {noreply,State};
-       true ->
-	    Status = maps:get(status,Node,undefined),
-	    Serial = maps:get(serial,Node,0),
-	    %% io:format("Serial = ~w, Status = ~w\n", [Serial, Status]),
-	    if Status =:= up ->
-		    XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
-		    send_sdo_set(XCobId, ?IX_STORE_PARAMETERS,1,
-				 <<"evas">>),
-		    %% FIXME: wait for save to complete!
-		    {noreply,State};
-	       true ->
-		    {noreply,State}
-	    end
-    end.
-
-%% restore to saved parameters
-action_restore(State) ->
-    Node = State#state.selected,
-    if Node =:= undefined ->
-	    {noreply,State};
-       true ->
-	    Status = maps:get(status,Node,undefined),
-	    Serial = maps:get(serial,Node,0),
-	    %% io:format("Serial = ~w, Status = ~w\n", [Serial, Status]),
-	    if Status =:= up ->
-		    XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
-		    send_sdo_set(XCobId,
-				 ?IX_RESTORE_DEFAULT_PARAMETERS,
-				 1,<<"daol">>),
-		    %% FIXME: wait for load to complete!
-		    {noreply,State};
-	       true ->
-		    {noreply,State}
-	    end
-    end.
-
+%%
+%% powerZone test setup
+%% set output-type:1-8 dimmer
+%% set output-max-step:1-8 255
+%% set output-flags:1-8 anload,outact
+%% set input-flags:32 active
+%% set input-out:32 1..8
+%%
 powerZone_setup(_XCobId,_State) ->
-    %% set output-type:1-8 dimmer
-    %% set output-max-step:1-8 255
-    %% set output-flags:1-8 anload,outact
     ok.
-
+%%
+%% bridgeZone test setup
+%% set output-type:1-6 dimmer
+%% set output-max-step:1-6 255
+%% set output-type:7-10 onoff
+%% set output-flags:1-10 outact
+%% set input-flags:32 active
+%% set input-out:32 1..10
+%%
 bridgeZone_setup(_XCobId, _State) ->
-    %% set output-type:1-6 dimmer
-    %% set output-max-step:1-6 255
-    %% set output-type:7-10 onoff
-    %% set output-flags:1-10 outact
-    %%
     ok.
 
-ioZone_setup(XCobId,_State) ->
-    %% set output-type:1-8 onoff
-    %% set output-flags:7-10 outact
+%%
+%% ioZone test setup
+%% set output-type:1-8 onoff
+%% set output-flags:7-10 outact
+%% set input-flags:32 active
+%% set input-out:32 1..8
+%%
+ioZone_setup(_XCobId,_State) ->
     ok.
 
+%%
+%% controlZone test setup
+%%
 controlZone_setup(_XCobId,_State) ->
-    %% set output-type:1-8 onoff
-    %% set output-flags:7-10 outact
     ok.
 
 %%
@@ -675,14 +639,16 @@ border(ID,W,H,_Opts) ->
 
 %% bridgeZone layout
 bridgeZone(X,Y,_W,_H) ->
-    XGap = 10,
-    YGap = 10,
-    Y1 = YGap,
+    XGap = 12,
+    YGap = ?GROUP_FONT_SIZE,
+    Y0 = YGap,
     X1 = XGap,
     ID = "pdb",
 
+    {_,Yn,W0,H0} = tagged_text("pdb.app_vsn", "Version", X1, Y0),
+
     %% Aout x 2 (row=Y1,column X1)
-    {_,Y2,W1,H1} = aout_group("pdb.aout", 5, 6, X1, Y1),
+    {_,Y2,W1,H1} = aout_group("pdb.aout", 5, 6, X1, Yn+YGap),
 
     %% Ain x 4 (row=Y2,column=X1)
     {_,Y3,W2,H2} = ain_group("pdb.ain", 37, 40, X1, Y2+YGap),
@@ -701,7 +667,7 @@ bridgeZone(X,Y,_W,_H) ->
     {W6,H6} = add_buttons(ID, X1, Y5+YGap),
 
     Wt = XGap+max(max(W1,W6),max(W2+W4+XGap, W3+W5+XGap))+XGap,
-    Ht = YGap+H1+YGap+max(H2+YGap+H3, H4+YGap+H5)+YGap+H6+YGap,
+    Ht = YGap+H0+YGap+H1+YGap+max(H2+YGap+H3, H4+YGap+H5)+YGap+H6+YGap,
     group_rectangle(ID,"bridgeZone",X,Y,Wt,Ht,all),
     ok.
 
@@ -765,8 +731,8 @@ powerZone(X,Y,_W,_H) ->
 
 %% add hold and go buttons
 add_buttons(ID, X, Y) ->
-    W = 64,
-    H = 15,
+    W = ?BUTTON_WIDTH,
+    H = ?BUTTON_HEIGHT,
     YGap = 10,
     XGap = 8,
     X0 = X,
@@ -902,12 +868,12 @@ dout_group(ID, Chan0, Chan1, X0, Y0) ->
 
 dout(ID0,Chan,X,Y) ->
     ID = ID0++[$.,$e|integer_to_list(Chan)],
-    W = 24, H = 12,
+    W = ?ONOFF_WIDTH, H = ?ONOFF_FONT_SIZE,
     epxy:new(ID,[{type,switch},
 		 {halign,center},
 		 {x,X},{y,Y},{width,W},{height,H},
 		 {shadow_x,2},{shadow_y,2},{children_first,false},
-		 {font,[{name,"Arial"},{weight,bold},{size,10}]},
+		 {font,[{name,"Arial"},{weight,bold},{size,?ONOFF_FONT_SIZE}]},
 		 {fill,solid},{color,lightgray},
 		 {text,"OFF"}
 		]),
@@ -916,7 +882,7 @@ dout(ID0,Chan,X,Y) ->
 
 din(ID0,Chan,X,Y) ->
     ID = ID0++[$.,$e|integer_to_list(Chan)],
-    W = 24, H = 12,
+    W = 24, H = 14,
     epxy:new(ID,[{type,value},
 		 {halign,center},{valign,center},
 		 {x,X},{y,Y},{width,W},{height,H},
@@ -935,7 +901,7 @@ din(ID0,Chan,X,Y) ->
 
 ain(ID0,Chan,X,Y) ->
     ID = ID0++[$.,$e|integer_to_list(Chan)],
-    W = 40, H = 12,    
+    W = 40, H = ?AIN_FONT_SIZE,
     epxy:new(ID,[{type,value},
 		 {halign,center},{valign,center},
 		 {x,X},{y,Y},{width,W},{height,H},
@@ -956,14 +922,14 @@ ain(ID0,Chan,X,Y) ->
 
 aload(ID0,Chan,X,Y) ->
     ID = ID0++[$.,$e|integer_to_list(Chan)],
-    W = 32, H = 12,    
+    W = 32, H = ?ALOAD_FONT_SIZE,
     epxy:new(ID,
 	     [{type,value},
 	      {halign,center},{valign,center},
 	      {x,X},{y,Y},{width,W},{height,H},
 	      {children_first,false},
 	      {font,[{name,"Arial"},{weight,bold},
-		     {size,?AIN_FONT_SIZE}]},
+		     {size,?ALOAD_FONT_SIZE}]},
 	      {fill,solid},{color,white},
 	      {format,"~.2f"},
 	      {value,0},
@@ -978,9 +944,11 @@ aload(ID0,Chan,X,Y) ->
     
 aout(ID0,Chan,X,Y) ->
     ID = ID0++[$.,$e|integer_to_list(Chan)],
-    W = 100+48, H = 12,
+    W = ?SLIDER_WIDTH+?ONOFF_WIDTH+16, H = ?ONOFF_FONT_SIZE,
+
     epxy:new(ID,[{type,slider},
-		 {x,X+40},{y,Y+2},{width,100},{height,8},
+		 {x,X+?ONOFF_WIDTH+16},{y,Y+2},
+		 {width,?SLIDER_WIDTH},{height,?SLIDER_HEIGHT},
 		 {fill,solid},{color,lightBlue},
 		 {min,0},{max,65535},
 		 {orientation, horizontal},
@@ -991,9 +959,9 @@ aout(ID0,Chan,X,Y) ->
     ID1 = ID++".onoff",
     epxy:new(ID1,[{type,switch},
 		  {halign,center},
-		  {x,-40},{y,-4},{width,24},{height,H},
+		  {x,-(?ONOFF_WIDTH+16)},{y,-4},{width,?ONOFF_WIDTH},{height,H},
 		  {shadow_x,2},{shadow_y,2},{children_first,false},
-		  {font,[{name,"Arial"},{weight,bold},{size,10}]},
+		  {font,[{name,"Arial"},{weight,bold},{size,?ONOFF_FONT_SIZE}]},
 		  {fill,solid},{color,lightgray},
 		  {text,"OFF"}
 		 ]),
@@ -1002,9 +970,10 @@ aout(ID0,Chan,X,Y) ->
 
 pout(ID0,Chan,X,Y) ->
     ID = ID0++[$.,$e|integer_to_list(Chan)],
-    W = 100+48, H = 12,
+    W = ?SLIDER_WIDTH+?ONOFF_WIDTH+16, H = ?ONOFF_FONT_SIZE,
     epxy:new(ID,[{type,slider},
-		 {x,X+40},{y,Y+2},{width,100},{height,8},
+		 {x,X+?ONOFF_WIDTH+16},{y,Y+2},
+		 {width,?SLIDER_WIDTH},{height,?SLIDER_HEIGHT},
 		 {fill,solid},{color,lightGreen},
 		 {min,0},{max,65535},
 		 {orientation, horizontal},
@@ -1015,15 +984,14 @@ pout(ID0,Chan,X,Y) ->
     ID1 = ID++".onoff",
     epxy:new(ID1,[{type,switch},
 		  {halign,center},
-		  {x,-40},{y,-4},{width,24},{height,H},
+		  {x,-(?ONOFF_WIDTH+16)},{y,-4},{width,?ONOFF_WIDTH},{height,H},
 		  {shadow_x,2},{shadow_y,2},{children_first,false},
-		  {font,[{name,"Arial"},{weight,bold},{size,10}]},
+		  {font,[{name,"Arial"},{weight,bold},{size,?ONOFF_FONT_SIZE}]},
 		  {fill,solid},{color,lightgray},
 		  {text,"OFF"}
 		 ]),
     epxy:add_callback(ID1,switch,?MODULE),
     {X,Y+H,W,H}.
-
 
 group_rectangle(ID,Text,X,Y,W,H,Status) ->
     epxy:new(ID,
@@ -1043,6 +1011,39 @@ group_rectangle(ID,Text,X,Y,W,H,Status) ->
 	      {x,5},{y,-5},
 	      {height,10}  %% width,25
 	     ]).
+
+tagged_text(ID, TagText, X, Y) ->
+    XOffs = length(TagText)*10,
+    W = 8*10,
+    H = 12,
+    epxy:new(ID,
+	     [{type,text},
+	      {font,[{name,"Arial"},{slant,roman},
+		     {size,?GROUP_FONT_SIZE}]},
+	      {font_color, black},
+	      {text,""},
+	      {color,white},{fill,solid},
+	      {halign,left},
+	      {x,X+XOffs},{y,Y},
+	      {height,10}, {width,W}
+	     ]),
+    epxy:new(ID++".border",
+	     [{type,rectangle},
+	      {color,black},
+	      {x,-1},{y,-1},
+	      {width,W+2},{height,H+2}]),
+    epxy:new(ID++".tag",
+	     [{type,text},
+	      {font,[{name,"Arial"},{slant,roman},
+		     {size,?GROUP_FONT_SIZE}]},
+	      {font_color, black},
+	      {text,TagText},
+	      {color,white},{fill,solid},
+	      {halign,left},
+	      {x,-XOffs},{y,0},
+	      {height,10}
+	     ]),
+    {X,Y+H, XOffs + W, H}.
 
 send_digital2(CobId, Si, Value) ->
     send_pdo2_tx(CobId,?MSG_DIGITAL,Si,Value).
@@ -1122,51 +1123,19 @@ send_pdo2_tx(CobId, Index, SubInd, Value) ->
     Frame = #can_frame { id=CanId,len=8,data=Bin},
     can:send(Frame).
 
-
-
-%% generate a request to read node values
-send_sdo_get(CobId, Index, SubInd) ->
-    Bin = ?sdo_ccs_initiate_upload_request(0,Index,SubInd,0),
-    CobId1 = case ?is_cobid_extended(CobId) of
-		 true ->
-		     NodeId = ?XNODE_ID(CobId),
-		     ?XCOB_ID(?SDO_RX,NodeId);
-		 false ->
-		     NodeId = ?NODE_ID(CobId),
-		     ?COB_ID(?SDO_RX,NodeId)
-	     end,
-    CanId = ?COBID_TO_CANID(CobId1),
-    Frame = #can_frame { id=CanId,len=8,data=Bin},
-    can:send(Frame).
-
-%% generate a request to read node values
-send_sdo_set(CobId, Index, SubInd, Value) when is_integer(Value) ->
-    send_sdo_set_(CobId, Index, SubInd,<<Value:32/little>>);
-send_sdo_set(CobId, Index, SubInd, Value) when is_binary(Value) ->
-    send_sdo_set_(CobId, Index, SubInd,Value).
-
-send_sdo_set_(CobId, Index, SubInd, Data) ->
-    Bin = ?sdo_ccs_initiate_download_request(0,3,1,1,Index,SubInd,Data),
-    CobId1 = case ?is_cobid_extended(CobId) of
-		 true ->
-		     NodeId = ?XNODE_ID(CobId),
-		     ?XCOB_ID(?SDO_RX,NodeId);
-		 false ->
-		     NodeId = ?NODE_ID(CobId),
-		     ?COB_ID(?SDO_RX,NodeId)
-	     end,
-    CanId = ?COBID_TO_CANID(CobId1),
-    Frame = #can_frame { id=CanId,len=8,data=Bin},
-    can:send(Frame).
-
-
 %% reply from node
 sdo_tx(CobId,Bin,State) ->  
     case Bin of
 	?ma_scs_initiate_download_response(Index,SubInd) ->
 	    ?dbg("sdo_tx: CobId=~s, SET RESP index=~w, si=~w\n",
 		 [integer_to_list(CobId,16),Index,SubInd]),
-	    {noreply,State};
+	    case State#state.sdo_request of
+		{Index,SubInd} ->
+		    %% SDO request ok
+		    {noreply,State#state { sdo_request = undefined }};
+		undefined ->
+		    {noreply,State}
+	    end;
 
 	?ma_scs_initiate_upload_response(N,E,S,Index,SubInd,Data) when
 	      E =:= 1 ->
@@ -1176,12 +1145,21 @@ sdo_tx(CobId,Bin,State) ->
 	    State1 = set_value_by_cobid(CobId,Index,SubInd,Value,State),
 	    {noreply,State1};
 
-	?ma_abort_transfer(Index,_SubInd,Code) ->
-	    if Code =:= ?ABORT_NO_SUCH_OBJECT, Index =:= ?INDEX_BOOT_VSN ->
-		    State1 = set_by_cobid(CobId,status,up,State),
-		    {noreply,State1};
-	       true ->
-		    {noreply,State}
+	?ma_abort_transfer(Index,SubInd,Code) ->
+	    ?dbg("sdo_tx: CobId=~s, ABORT index=~w, si=~w, code=~w\n",
+		 [integer_to_list(CobId,16),Index,SubInd,Code]),
+	    case State#state.sdo_request of
+		{Index,SubInd} ->
+		    {noreply,State#state { sdo_request = undefined,
+					   sdo_error = Code }};
+		_ ->
+		    if Code =:= ?ABORT_NO_SUCH_OBJECT,
+		       Index =:= ?INDEX_BOOT_VSN ->
+			    State1 = set_by_cobid(CobId,status,up,State),
+			    {noreply,State1};
+		       true ->
+			    {noreply,State}
+		    end
 	    end;
 	_ ->
 	    ?warn("sdo_tx: CobId=~s, only  expedited mode supported\n",
@@ -1198,11 +1176,14 @@ sdo_value(1,3,<<Value:8/little,_:24>>) -> Value.
 node_booted(_CobID, Serial, State) ->
     ?dbg("Node ~s booted\n", [integer_to_list(Serial,16)]),
     Nodes = set_status_by_serial(Serial, boot, State#state.nodes),
+    io:format("Nodes = ~p\n", [Nodes]),
     if State#state.hold_mode ->
 	    XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
 	    WDT = 0,
-	    send_sdo_set(XCobId, ?INDEX_UBOOT_HOLD, 0, WDT),
-	    {noreply, State#state { nodes=Nodes, hold_mode=false }};
+	    co_sdo_cli:send_sdo_set(XCobId, ?INDEX_UBOOT_HOLD, 0, WDT),
+	    {noreply, State#state { nodes=Nodes, 
+				    sdo_request={?INDEX_UBOOT_HOLD, 0},
+				    hold_mode=false }};
        true ->
 	    {noreply, State#state { nodes=Nodes }}
     end.
@@ -1215,8 +1196,8 @@ node_started(_CobId, Serial, State) ->
       fun() ->
 	      XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
 	      ?dbg("XCobId = ~8.16.0B\n", [XCobId]),
-	      send_sdo_get(XCobId, ?INDEX_ID, 0),
-	      send_sdo_get(XCobId, ?IX_IDENTITY_OBJECT, ?SI_IDENTITY_PRODUCT)
+	      co_sdo_cli:send_sdo_get(XCobId, ?INDEX_ID, 0),
+	      co_sdo_cli:send_sdo_get(XCobId, ?IX_IDENTITY_OBJECT, ?SI_IDENTITY_PRODUCT)
 	      %% ...
       end),
     {noreply, State#state { nodes=Nodes }}.
@@ -1229,10 +1210,11 @@ node_running(_CobId, Serial, State) ->
 	      fun() ->
 		      XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
 		      io:format("XCobId = ~8.16.0B\n", [XCobId]),
-		      send_sdo_get(XCobId, ?INDEX_ID, 0),
-		      send_sdo_get(XCobId, ?IX_IDENTITY_OBJECT,
-				  ?SI_IDENTITY_PRODUCT),
-		      send_sdo_get(XCobId, ?INDEX_BOOT_VSN, 0),
+		      co_sdo_cli:send_sdo_get(XCobId, ?INDEX_ID, 0),
+		      co_sdo_cli:send_sdo_get(XCobId, ?IX_IDENTITY_OBJECT,
+					      ?SI_IDENTITY_PRODUCT),
+		      co_sdo_cli:send_sdo_get(XCobId, ?INDEX_BOOT_APP_VSN, 0),
+		      co_sdo_cli:send_sdo_get(XCobId, ?INDEX_BOOT_VSN, 0),
 		      if XCobId =:= State#state.selected_eff ->
 			      send_pdo1_tx(0, ?MSG_REFRESH, 0, 0);
 			 true ->
@@ -1444,6 +1426,8 @@ set_value_by_cobid(CobId,Index,SubInd,Value,State) ->
 		_ ->
 		    State1
 	    end;
+	?INDEX_BOOT_APP_VSN ->
+	    set_by_cobid(CobId,app_vsn,Value,State);
 	?INDEX_BOOT_VSN ->
 	    set_by_cobid(CobId,status,boot,State);
 	_ ->
@@ -1491,12 +1475,32 @@ to_text(Text) when is_list(Text) -> Text.
 %% set text value in nodes table
 %% nodes.r<pos>.<key>
 set_text(Key,Pos,Value) ->
-    ID = "nodes.r"++integer_to_list(Pos)++"."++atom_to_list(Key),
-    io:format("set_text: id=~s, value=~s\n", [ID,Value]),
-    epxy:set(ID,[{text,Value}]).
+    case is_node_item(Key) of
+	true ->
+	    ID = "nodes.r"++integer_to_list(Pos)++"."++atom_to_list(Key),
+	    io:format("set_text: id=~s, value=~s\n", [ID,Value]),
+	    epxy:set(ID,[{text,Value}]);
+	false ->
+	    ok
+    end.
+
+is_node_item(serial) -> true;
+is_node_item(id) -> true;
+is_node_item(product) -> true;
+is_node_item(vsn) -> true;
+is_node_item(status) -> true;
+is_node_item(_) -> false.
 
 serial_to_text(Serial) ->
     tl(integer_to_list(16#1000000 + Serial, 16)).
+
+version_to_text(16#00000000) -> "zero";
+version_to_text(16#2F5EBD7A) -> "empty";
+version_to_text(16#FFFFFFFF) -> "none";
+version_to_text(Vsn) ->
+    {{Year,Mon,Day},{_H,_M,_S}} = 
+	calendar:gregorian_seconds_to_datetime(Vsn+62167219200),
+    lists:flatten(io_lib:format("~4..0w-~2..0w-~2..0w", [Year,Mon,Day])).
 
 %% find node with Serial
 take_node_by_serial(Serial, Ns) ->
@@ -1536,3 +1540,38 @@ find_node_by_key(Key,Value,[Node|Ns]) ->
     end;
 find_node_by_key(_Key, _Value, []) ->
     false.
+
+load_firmware() ->
+    Dir = code:priv_dir(gordon),
+    case file:list_dir(Dir) of
+	{ok,L} ->
+	    load_firm(Dir, L, []);
+	Error ->
+	    ?warn("unable to read priv dir ~p\n", [Error]),
+	    []
+    end.
+
+load_firm(Dir,[F|Fs],Acc) ->
+    File = filename:join(Dir,F),
+    try gordon_uapp:load(File) of
+	{ok, Uapp} ->
+	    load_firm(Dir,Fs,[Uapp|Acc]);
+	Error ->
+	    load_firm_hex(Dir,Fs,File,Acc)
+    catch
+	error:_ ->
+	    load_firm_hex(Dir,Fs,File,Acc)
+    end;
+load_firm(_Dir,[],Acc) ->
+    Acc.
+
+load_firm_hex(Dir,Fs,File,Acc) ->
+    try elpcisp_ihex:load(File) of
+	{ok,Hex} ->
+	    load_firm(Dir,Fs,[{ihex,Hex}|Acc]);
+	Error ->
+	    load_firm(Dir,Fs,Acc)
+    catch
+	error:_ ->
+	    load_firm(Dir,Fs,Acc)
+    end.
