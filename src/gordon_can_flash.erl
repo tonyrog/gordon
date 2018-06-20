@@ -12,7 +12,7 @@
 -include_lib("canopen/include/sdo.hrl").
 -include_lib("canopen/include/co_app.hrl").
 
--export([upload/5]).
+-export([upload/4, upload/5]).
 -compile(export_all).
 
 -define(ABORT_LPC_IAP_BASE, 16#0BAD0000). 
@@ -24,6 +24,10 @@
 -define(is_result_iap_success(R),
 	(?is_result_iap(R) andalso (((R) band 16#FF) == ?IAP_CMD_SUCCESS))).
 
+
+%% FIXME: add flash multiple non disjoint segments?
+upload(Nid,[{Addr,Segment}],Bsize,Progress) ->
+    upload(Nid,Addr,Segment,Bsize,Progress).
 
 upload(Nid,Addr,Data,Bsize,Progress) ->
     co_sdo_cli:attach(Nid),
@@ -54,9 +58,9 @@ upload(Nid,Addr,Data,Bsize,Progress) ->
 	    end
     end.
 
-blocks_upload(_Nid,_Addr,<<>>,_Bsize,{L,_L0,Len},Progress) ->
+blocks_upload(Nid,_Addr,<<>>,_Bsize,{L,_L0,Len},Progress) ->
     Progress(L/Len),
-    {ok,{L,L,Len}};
+    co_sdo_cli:set(Nid,?INDEX_BOOT_APP_VSN,0,16#2F5EBD7A,1000);
 blocks_upload(Nid,Addr,Data,Bsize,LLen,Progress) ->
     {Block,Data1} = get_block(Data,Bsize),
     case block_upload(Nid,Addr,Block,LLen,Progress) of
@@ -67,7 +71,7 @@ blocks_upload(Nid,Addr,Data,Bsize,LLen,Progress) ->
     end.
 
 block_upload(Nid,Addr,Block,LLen,Progress) ->
-    io:format("block_upload: size=~w, Block=~p\n", [byte_size(Block), Block]),
+    %%io:format("block_upload: size=~w, Block=~p\n", [byte_size(Block), Block]),
     case co_sdo_cli:set(Nid,?INDEX_UBOOT_ADDR,1,Addr,1000) of
 	ok ->
 	    N = byte_size(Block),
@@ -75,7 +79,8 @@ block_upload(Nid,Addr,Block,LLen,Progress) ->
 		{ok,LLen1} ->
 		    Crc = crc32r(Block),
 		    case co_sdo_cli:set(Nid,?INDEX_UBOOT_FLASH,1,Crc,2000) of
-			ok -> {ok,Addr+N,LLen1};
+			ok ->
+			    {ok,Addr+N,LLen1};
 			{error,Code} when ?is_result_iap_success(Code) ->
 			    {ok,Addr+N,LLen1};
 			{error,Code} when is_integer(Code) ->
@@ -91,7 +96,7 @@ block_upload(Nid,Addr,Block,LLen,Progress) ->
 block_upload_(_Nid,_I,_Data,0,{L,_L0,Len},Progress) ->
     Progress(L/Len),
     {ok,{L,L,Len}};
-block_upload_(Nid,I,Data,N,LLen={L,L0,Len},Progress) when N > 0 ->
+block_upload_(Nid,I,Data,N,_LLen={L,L0,Len},Progress) when N > 0 ->
     Buf = get_buf32(I, Data),
     case co_sdo_cli:set(Nid,?INDEX_UBOOT_WRITE,1,Buf,1000) of
 	ok ->

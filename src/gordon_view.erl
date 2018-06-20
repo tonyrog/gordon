@@ -81,8 +81,8 @@
 -define(TYPE_DMX,         16#08).
 -define(TYPE_INPUT,       16#FF).
 
--define(dbg(F,A), io:format((F),(A))).
-%%-define(dbg(F,A), ok).
+%%-define(dbg(F,A), io:format((F),(A))).
+-define(dbg(F,A), ok).
 -define(warn(F,A), io:format((F),(A))).
 -define(error(F,A), io:format((F),(A))).
 
@@ -289,6 +289,12 @@ handle_info({select,_ID,[{press,0},{x,_},{y,_}|_]},State) ->
     %% ignore mouse release in node selection
     {noreply, State};
 
+handle_info({node_flashed,ID,Nid,Status,_Result},State) ->
+    State1 = set_by_cobid(Nid,status,Status,State),
+    epxy:set(ID,[{value,0.0}]),
+    %% if Result == error then signal in window
+    {noreply, State1};
+
 handle_info({switch,ID,[{value,Value}]},State) ->
     Si = case ID of
 	     "pdb.pout.e1.onoff" -> 1;
@@ -344,17 +350,27 @@ handle_info({button,[_,_,_|".hold"],[{value,1}]},State) ->
 %% leave boot mode
 handle_info({button,[_,_,_|".go"],[{value,1}]},State) ->
     WDT = 1,
-    io:format("Go: hold=~w,selected=~w\n", [State#state.hold_mode,
-					    State#state.selected_pos]),
     {noreply,action_sdo(State,boot,?INDEX_UBOOT_GO,0,WDT)};
-
+%%
+%% locate firmware image given selected product
+%% check that firmware is an upgrade or first firmware
+%% must be an uapp.
+%% start process disable all input (except flash dialog)
+%% show progress remove flash dialog and enable input
+%%
 handle_info({button,[_,_,_|".upgrade"],[{value,1}]},State) ->
-    %% locate firmware image given selected product
-    %% check that firmware is an upgrade or first firmware
-    %% must be an uapp.
-    %% start process disable all input (except flash dialog)
-    %% show progress remove flash dialog and enable input
-    {noreply,State};
+    case find_node_by_pos(State#state.selected_pos,State#state.nodes) of
+	undefined -> 
+	    {noreply,State};
+	Node ->
+	    case match_uapp_firmware(Node, State) of
+		false ->
+		    {noreply,State};
+		{Version,Bs,_UApp} ->
+		    State1 = flash_node(Node,Version,Bs,State),
+		    {noreply,State1}
+	    end
+    end;
 
 %% reset the node
 handle_info({button,[_,_,_|".reset"],[{value,1}]},State) ->
@@ -475,7 +491,7 @@ refresh_node_state(State) ->
 	Node -> refresh_node_state(Node,State)
     end.
 
-refresh_node_state(Node, State) when 
+refresh_node_state(_Node, State) when 
       State#state.selected_id =:= undefined ->
     State;
 refresh_node_state(Node, State) ->
@@ -485,13 +501,20 @@ refresh_node_state(Node, State) ->
     case maps:get(status,Node,undefined) of
 	undefined -> 
 	    State;
+
+	flash ->
+	    disable_buttons(PDx,["hold","setup","factory","save","restore"]),
+	    disable_buttons(PDx,["go","upgrade"]),
+	    enable_buttons(PDx,["reset"]),
+	    State;
+	    
 	boot ->
 	    disable_buttons(PDx,["hold","setup","factory","save","restore"]),
 	    enable_buttons(PDx,["reset","go"]),
 	    case match_uapp_firmware(Node, State) of
 		false ->
 		    disable_buttons(PDx,["upgrade"]);
-		_UApp ->
+		{_Version,_Bs,_UApp} ->
 		    enable_buttons(PDx,["upgrade"])
 	    end,
 	    State;
@@ -516,21 +539,22 @@ match_uapp_firmware(Node, State) ->
     AppVsn = maps:get(app_vsn, Node, undefined),
     AppVersion = gordon_uapp:decode_app_vsn(AppVsn),
     io:format("Match firmware, ~p\n",
-	      [{Product,Vsn,AppVersion,AppVersion}]),
+	      [{Product,Vsn,AppVersion}]),
     match_uapp_firmware_(Product,Vsn,AppVersion,State#state.firmware).
 
 match_uapp_firmware_(Product,Vsn={Major,Minor},AppVersion,
 		     [UApp={uapp,{Product,_Variant,Major,Minor},Banks}|Fs]) ->
     case match_uapp_vsn(AppVersion, Banks) of
-	true -> UApp;
-	false -> match_uapp_firmware_(Product,Vsn,AppVersion,Fs)
+	false -> match_uapp_firmware_(Product,Vsn,AppVersion,Fs);
+	{true,{Version,Bs}} -> {Version,Bs,UApp}
     end;
 match_uapp_firmware_(Product,Vsn,AppVersion,[_UApp|Fs]) ->
     match_uapp_firmware_(Product,Vsn,AppVersion,Fs);
 match_uapp_firmware_(_Product,_Vsn,_AppVersion,[]) ->
     false.
 
-match_uapp_vsn(AppVersion, [{banks,Match,_Bs}|Banks]) ->
+match_uapp_vsn(AppVersion, [{banks,Match,Bs}|Banks]) ->
+    io:format("Match ~p with ~p\n", [AppVersion,Match]),
     case proplists:get_value(version,Match) of
 	undefined -> 
 	    match_uapp_vsn(AppVersion,Banks);
@@ -538,7 +562,7 @@ match_uapp_vsn(AppVersion, [{banks,Match,_Bs}|Banks]) ->
 	    io:format("Node AppVersion=~p, File Version=~p\n",
 		      [AppVersion,Version]),
 	    if AppVersion =:= undefined;
-	       Version > AppVersion -> true;
+	       Version > AppVersion -> {true,{Version,Bs}};
 	       true -> match_uapp_vsn(AppVersion, Banks)
 	    end
     end;
@@ -743,6 +767,7 @@ table_row(Parent,I,TxW,TxH,_W) ->
     W4 = 5*TxW,
     text_cell(ID++".status", X4, 0, W4, H,
 	      [{text,""},{halign,center}]),
+
     X4 + W4 + 1.
 
 %% parent to all rows
@@ -755,8 +780,12 @@ table(ID, X, Y, W, H) ->
 row(ID, X, Y, W, H, Disabled) ->
     epxy:new(ID,[{type,rectangle},
 		 {hidden,true},{disabled,Disabled},
+		 {orientation, horizontal},
 		 {children_first,false},
-		 {fill,blend},{color,red},
+		 {fill,blend},
+		 {color,green},
+		 {color2,red},
+		 {min, 0.0}, {max, 1.0}, {value,0.0},
 		 {x,X},{y,Y},{width,W},{height,H}]).
 
 text_cell(ID,X,Y,W,H,Opts) ->
@@ -1754,4 +1783,23 @@ firmware_size([]) ->
 banks_size(Bs) ->
     lists:sum([byte_size(Segment) || {_Addr,Segment} <- Bs]).
 
-    
+flash_node(Node,_Version,Bs,State) ->
+    SELF = self(),
+    Pos = maps:get(pos,Node,undefined),
+    ID = "nodes.r"++integer_to_list(Pos),
+    Serial = maps:get(serial,Node,0),
+    Nid = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
+    State1 = set_by_cobid(Nid,status,flash,State),
+    %% FIXME: monitor this process and update when crashes etc
+    spawn(
+      fun() ->
+	      Progress = fun(V) -> epxy:set(ID,[{value,V}]) end,
+	      case gordon_can_flash:upload(Nid,Bs,1024,Progress) of
+		  ok ->
+		      SELF ! {node_flashed,ID,Nid,boot,ok};
+		  Error ->
+		      SELF ! {node_flashed,ID,Nid,boot,Error}
+	      end
+      end),
+    State1.
+
