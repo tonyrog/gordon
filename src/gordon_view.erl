@@ -160,6 +160,8 @@ init(Options) ->
     bridgeZone(X,Y,W,H),
     ioZone(X,Y,W,H),
     powerZone(X,Y,W,H),
+    uBoot(X,Y,W,H),
+    lpcBoot(X,Y,W,H),
 
     can_router:attach(),
 
@@ -498,6 +500,15 @@ refresh_node_state(Node, State) ->
     PDx = State#state.selected_id,
     AppVsn = maps:get(app_vsn,Node,0),
     epxy:set(PDx++".app_vsn", [{text,format_value(app_vsn,AppVsn)}]),
+    UAppMatch =  match_uapp_firmware(Node, State),
+    case UAppMatch of
+	false ->
+	    epxy:set(PDx++".uapp_vsn", [{text,""}]);
+	{Version,_Bs,_UApp} ->
+	    VersText = format_value(app_vsn,Version),
+	    epxy:set(PDx++".uapp_vsn", [{text,VersText}])
+    end,
+
     case maps:get(status,Node,undefined) of
 	undefined -> 
 	    State;
@@ -511,10 +522,10 @@ refresh_node_state(Node, State) ->
 	boot ->
 	    disable_buttons(PDx,["hold","setup","factory","save","restore"]),
 	    enable_buttons(PDx,["reset","go"]),
-	    case match_uapp_firmware(Node, State) of
+	    case UAppMatch of
 		false ->
 		    disable_buttons(PDx,["upgrade"]);
-		{_Version,_Bs,_UApp} ->
+		_Match ->
 		    enable_buttons(PDx,["upgrade"])
 	    end,
 	    State;
@@ -668,6 +679,7 @@ event(Signal,ID,Env) ->
     ?dbg("Got event callback ~p\n", [{Signal,ID,Env}]),
     ?SERVER ! {Signal,ID,Env}.
 
+%% show the row 
 select_row(Row) ->
     RowID = "nodes.r"++integer_to_list(Row),
     epxy:set(RowID,[{hidden,false}]).
@@ -676,11 +688,11 @@ deselect_row(undefined, State) ->
     State;
 deselect_row(Pos, State) ->
     case State#state.selected_id of
-	undefined -> 
+	undefined ->
 	    ok;
-	PDx ->
+	ID ->
 	    RowID = "nodes.r"++integer_to_list(Pos),
-	    epxy:set(PDx,[{hidden,all},{disabled,all}]),
+	    epxy:set(ID,[{hidden,all},{disabled,all}]),
 	    epxy:set(RowID,[{hidden,true}])
     end,
     State#state { selected_pos=undefined, selected_id=undefined }.
@@ -820,7 +832,8 @@ bridgeZone(X,Y,_W,_H) ->
     X1 = XGap,
     ID = "pdb",
 
-    {_,Y1,_W0,H0} = tagged_text("pdb.app_vsn", "Version", X1, Y0),
+    {X11,Y1,_W0,H0} = tagged_text("pdb.app_vsn", "Version", X1, Y0),
+    {_,_,_,_} = tagged_text("pdb.uapp_vsn", "UApp", X11+XGap, Y0),
 
     %% Aout x 2 (row=Y1,column X1)
     {_,Y2,W1,H1} = aout_group("pdb.aout", 5, 6, X1, Y1+YGap),
@@ -854,7 +867,8 @@ ioZone(X,Y,_W,_H) ->
     X2 = X1+64,
     ID = "pdi",
 
-    {_,Yn,_W0,H0} = tagged_text("pdi.app_vsn", "Version", X1, Y0),
+    {X11,Yn,_W0,H0} = tagged_text("pdi.app_vsn", "Version", X1, Y0),
+    {_,_,_,_} = tagged_text("pdi.uapp_vsn", "UApp", X11+XGap, Y0),
     Y1 = Yn,
 
     %% Din x 12 (row Y3,column=X1) support iozone24?
@@ -882,7 +896,8 @@ powerZone(X,Y,_W,_H) ->
     X1 = XGap,
     ID = "pds",
 
-    {_,Y1,_W0,H0} = tagged_text("pds.app_vsn", "Version", X1, Y0),
+    {X11,Y1,_W0,H0} = tagged_text("pds.app_vsn", "Version", X1, Y0),
+    {_,_,_,_} = tagged_text("pds.uapp_vsn", "UApp", X11+XGap, Y0),
 
     %% Ain x 8 (row=Y1,column=X1)
     {_,_Y3,W2,H2} = ain_group("pds.ain", 1, 8, X1, Y1+YGap),
@@ -908,6 +923,73 @@ powerZone(X,Y,_W,_H) ->
 
     ok.
 
+%%
+%% uBoot mode dialog
+%% Buttons 
+%%    Go  Upgrade Reset
+%%
+uBoot(X,Y,_W,_H) ->
+    XGap = 12,
+    YGap = ?GROUP_FONT_SIZE,
+    Y0 = YGap,
+    X1 = XGap,
+    ID = "uboot",
+
+    {X11,Y1,W0,H0} = tagged_text("uboot.app_vsn", "Version", X1, Y0),
+    {_,_,W1,_} = tagged_text("uboot.uapp_vsn", "UApp", X11+XGap, Y0),
+
+    {W6,H6} = add_uboot_buttons(ID, X1, Y1+YGap),
+
+    Wt = XGap+max(W0+W1,W6)+XGap,
+    Ht = YGap+H0+YGap+H6+YGap,
+
+    group_rectangle(ID,"uBoot",X,Y,Wt,Ht,all),
+    ok.
+
+%% Serial boot dialog
+%% boot version {Major,Minor} 
+%% product
+%% flashSize
+%% ramSize
+%% flashSectors
+%% maxCopySize
+%% variant
+%%
+lpcBoot(X,Y,_W,_H) ->
+    XGap = 12,
+    YGap = ?GROUP_FONT_SIZE,
+    Y0 = YGap,
+    X1 = XGap,
+    ID = "lpc",
+
+    {_,Y1,W0,H0} = tagged_text("lpc.vsn", "Version", X1, Y0),
+    {_,Y2,W1,H1} = tagged_text("lpc.product", "Product", X1, Y1+YGap),
+    {_,Y3,W2,H2} = tagged_text("lpc.flashSize", "FlashSize", X1, Y2+YGap),
+    {_,Y4,W3,H3} = tagged_text("lpc.ramSize", "RamSize", X1, Y3+YGap),
+    {_,Y5,W4,H4} = tagged_text("lpc.flashSectors", "Sectors", X1, Y4+YGap),
+    {_,Y6,W5,H5} = tagged_text("lpc.maxCopySize", "MaxCopySize", X1, Y5+YGap),
+    {_,_Y7,W6,H6} = tagged_text("lpc.variant", "Variant", X1, Y6+YGap),
+    
+    Wt = XGap+lists:max([W0,W1,W2,W3,W4,W5,W6])+XGap,
+    Ht = YGap+lists:sum([H0,H1,H2,H3,H4,H5,H6])+7*YGap,
+
+    group_rectangle(ID,"lpcBoot",X,Y,Wt,Ht,all),
+    ok.
+
+%% add hold and go buttons
+add_uboot_buttons(ID, X, Y) ->
+    W = ?BUTTON_WIDTH,
+    H = ?BUTTON_HEIGHT,
+    YGap = 10,
+    XGap = 8,
+    X0 = X,
+    X1 = X0 + W + XGap,
+    X2 = X1 + W + XGap,
+    Y0 = Y,
+    add_text_button(ID++".go",      "Go",      X0, Y0, W, H),
+    add_text_button(ID++".upgrade", "Upgrade", X1, Y0, W, H),
+    add_text_button(ID++".reset",   "Reset",   X2, Y0, W, H),
+    {3*W+1*XGap,1*H+1*YGap}.
 
 %% add hold and go buttons
 add_buttons(ID, X, Y) ->
@@ -923,9 +1005,7 @@ add_buttons(ID, X, Y) ->
     Y1 = Y0+H+YGap,
 
     add_text_button(ID++".hold",    "Hold",    X0, Y0, W, H),
-    add_text_button(ID++".go",      "Go",      X1, Y0, W, H),
-    add_text_button(ID++".upgrade", "Upgrade", X2, Y0, W, H),
-    add_text_button(ID++".reset",   "Reset",   X3, Y0, W, H),
+    add_text_button(ID++".reset",   "Reset",   X1, Y0, W, H),
 
     add_text_button(ID++".setup",   "Setup",   X0, Y1, W, H),
     add_text_button(ID++".factory", "Factory", X1, Y1, W, H),
@@ -1223,7 +1303,7 @@ tagged_text(ID, TagText, X, Y) ->
 	      {x,-XOffs},{y,0},
 	      {height,10}
 	     ]),
-    {X,Y+H, XOffs + W, H}.
+    {X+XOffs+W+2,Y+H,XOffs+W,H}.
 
 send_digital2(CobId, Si, Value) ->
     send_pdo2_tx(CobId,?MSG_DIGITAL,Si,Value).
@@ -1675,6 +1755,9 @@ format_value(serial,Value) ->
     tl(integer_to_list(16#1000000+Value, 16));
 format_value(vsn,{Major,Minor}) ->
     integer_to_list(Major)++"."++integer_to_list(Minor);
+format_value(app_vsn,{{Year,Mon,Day},{_H,_M,_S}}) ->
+    lists:flatten(io_lib:format("~4..0w-~2..0w-~2..0w", 
+				[Year,Mon,Day]));
 format_value(app_vsn,Value) ->
     case Value of
 	16#00000000 -> "zero";
