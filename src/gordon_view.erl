@@ -14,7 +14,7 @@
 -include_lib("canopen/include/canopen.hrl").
 -include_lib("canopen/include/sdo.hrl").
 -include_lib("canopen/include/co_app.hrl").
-
+-include_lib("elpcisp/src/elpcisp.hrl").
 %% API
 -export([start_link/0, start/0]).
 -export([start_rpi/0]).
@@ -42,12 +42,11 @@
 	  selected_pos,    %% Selected row | undefined
 	  selected_eff=0,  %% extended canid of selected node
 	  selected_sff=0,  %% short canid of selected node
-	  selected_id,     %% "pds"/"pdb"/"pdi"/"pdc"
 	  sdo_request,     %% current outstanding sdo_request
 	  sdo_error,       %% last sdo_error
 	  row_height = 1,  %% height of row selection area
 	  firmware = [],   %% list of available firmware for upgrade
-	  nodes = [] %% list of node maps
+	  nodes = []       %% list of node maps
 	}).
 
 -define(TEXT_CELL_FONT_SIZE, 18).
@@ -55,14 +54,17 @@
 -define(DOUT_FONT_SIZE, 14).
 -define(AIN_FONT_SIZE, 14).
 -define(ALOAD_FONT_SIZE, 14).
--define(BUTTON_FONT_SIZE, 14).
+-define(BUTTON_FONT_SIZE, 16).
 -define(ONOFF_FONT_SIZE, 14).
 -define(GROUP_FONT_SIZE, 12).
 -define(SLIDER_WIDTH,  100).
 -define(SLIDER_HEIGHT, 8).
 -define(ONOFF_WIDTH, 40).
--define(BUTTON_WIDTH, 64).
--define(BUTTON_HEIGHT, 15).
+-define(BUTTON_WIDTH, 72).
+-define(BUTTON_HEIGHT, 18).
+
+-define(NUM_TABLE_NODES, 16).
+
 
 -define(TYPE_NONE,       16#00).
 -define(TYPE_BACKLIGHT,  16#81).
@@ -150,7 +152,7 @@ init(Options) ->
     Width  = proplists:get_value(width, Options, 800),
     Height = proplists:get_value(height, Options, 480),
 
-    {_XOffset,_YOffset,RowHeight} = node_table(Width div 2, Height),
+    {_XOffset,_YOffset,RowHeight,LPC} = node_table(Width div 2, Height),
 
     %% define various layouts
     X = Width div 2,
@@ -170,7 +172,7 @@ init(Options) ->
 
     Firmware = load_firmware(),
 
-    {ok, #state{ row_height = RowHeight, firmware = Firmware }}.
+    {ok, #state{ row_height = RowHeight, firmware = Firmware, nodes = [LPC] }}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -250,11 +252,21 @@ handle_info({event,"screen",[{closed,true}]}, State) ->
 %% handle select in node list
 handle_info({select,"nodes.r"++RTxt,[{press,1},{x,_X},{y,_Y}|_]},State) ->
     Pos = list_to_integer(RTxt),
-    case find_node_by_pos(Pos,State#state.nodes) of
-	false ->
-	    ?dbg("deselect row=~w\n", [State#state.selected_pos]),
-	    {noreply, deselect_row(State#state.selected_pos,State)};
-	Node ->
+    State1 = deselect_row(State#state.selected_pos,State),
+    ?dbg("deselect row=~w\n", [State#state.selected_pos]),
+    case selected_id(Pos,State1) of
+	undefined ->
+	    {noreply, State1};
+	"lpc" ->
+	    highlight_row(Pos),
+	    State2 = State1#state { selected_pos = Pos,
+				    selected_eff = undefined,
+				    selected_sff =  undefined
+				    },
+	    show_pos(Pos,State2),
+	    {noreply, State2};
+	_SID ->
+	    Node = find_node_by_pos(Pos,State#state.nodes),
 	    Serial = maps:get(serial,Node,0),
 	    EFF = case Serial of
 		      0 -> 0;
@@ -264,26 +276,15 @@ handle_info({select,"nodes.r"++RTxt,[{press,1},{x,_X},{y,_Y}|_]},State) ->
 		      0 -> 0;
 		      M -> ?COB_ID(?PDO1_TX,M)
 		  end,
-	    PDx = case maps:get(product,Node,undefined) of
-		      undefined -> undefined;
-		      powerZone -> "pds";
-		      ioZone -> "pdi";
-		      bridgeZone -> "pdb";
-		      controlZone -> "pdc";
-		      _ -> undefined
-		  end,
-	    ?dbg("deselect row=~w\n", [State#state.selected_pos]),
-	    State1 = deselect_row(State#state.selected_pos,State),
 	    State2 = State1#state { selected_pos = Pos,
 				    selected_eff = EFF,
-				    selected_sff = SFF,
-				    selected_id  = PDx
+				    selected_sff = SFF
 				  },
-	    select_row(Pos),
-	    epxy:set(PDx,[{hidden,false},{disabled,false}]),
+	    highlight_row(Pos),
+	    show_pos(Pos,State2),
 	    State3 = refresh_node_state(Node, State2),
 	    ?dbg("select row=~w, eff=~8.16.0B, sff=~3.16.0B id=~s\n",
-		 [Pos, EFF, SFF, PDx]),
+		 [Pos, EFF, SFF, _SID]),
 	    send_pdo1_tx(0, ?MSG_REFRESH, 0, 0),
 	    {noreply, State3}
     end;
@@ -395,7 +396,7 @@ handle_info({button,[_,_,_|".setup"],[{value,1}]},State) ->
 	    Serial = maps:get(serial,Node,0),
 	    if Status =:= up ->
 		    XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
-		    case State#state.selected_id of
+		    case selected_id(State) of
 			"pdb" -> bridgeZone_setup(XCobId,State);
 			"pds" -> powerZone_setup(XCobId,State);
 			"pdi" -> ioZone_setup(XCobId,State);
@@ -415,6 +416,22 @@ handle_info({button,[_,_,_|".save"],[{value,1}]},State) ->
 
 handle_info({button,[_,_,_|".restore"],[{value,1}]},State) ->
     {noreply, action_sdo(State,up,?IX_RESTORE_DEFAULT_PARAMETERS,1,<<"daol">>)};
+
+handle_info({button,[_,_,_|".lpc_scan"],[{value,1}]},State) ->
+    %% test fill in LPC 2129 data
+    case lists:keyfind("2129", #device_type.product, elpcisp:lpc_types()) of
+	false ->
+	    {noreply, State};
+	D ->
+	    epxy:set("lpc.vsn", [{text,format_value(vsn,{1,65})}]),
+	    epxy:set("lpc.product", [{text,D#device_type.product}]),
+	    epxy:set("lpc.flashSize", [{text,format_value(flashSize,D#device_type.flashSize)}]),
+	    epxy:set("lpc.ramSize", [{text,format_value(ramSize,D#device_type.ramSize)}]),
+	    epxy:set("lpc.flashSectors", [{text,format_value(flashSectors,D#device_type.flashSectors)}]),
+	    epxy:set("lpc.maxCopySize", [{text,format_value(maxCopySize,D#device_type.maxCopySize)}]),
+	    epxy:set("lpc.variant", [{text,format_value(variant,D#device_type.variant)}]),
+	    {noreply, State}
+    end;
 
 handle_info({button,_ID,[{value,0}]},State) ->
     %% ignore button release
@@ -493,46 +510,41 @@ refresh_node_state(State) ->
 	Node -> refresh_node_state(Node,State)
     end.
 
-refresh_node_state(_Node, State) when 
-      State#state.selected_id =:= undefined ->
-    State;
 refresh_node_state(Node, State) ->
-    PDx = State#state.selected_id,
+    refresh_node_state(selected_id(State), Node, State).
+
+refresh_node_state(undefined, _Node, State) ->
+    State;
+refresh_node_state(SID, Node, State) ->
     AppVsn = maps:get(app_vsn,Node,0),
-    epxy:set(PDx++".app_vsn", [{text,format_value(app_vsn,AppVsn)}]),
+    epxy:set(SID++".app_vsn", [{text,format_value(app_vsn,AppVsn)}]),
     UAppMatch =  match_uapp_firmware(Node, State),
     case UAppMatch of
 	false ->
-	    epxy:set(PDx++".uapp_vsn", [{text,""}]);
+	    epxy:set(SID++".uapp_vsn", [{text,""}]);
 	{Version,_Bs,_UApp} ->
 	    VersText = format_value(app_vsn,Version),
-	    epxy:set(PDx++".uapp_vsn", [{text,VersText}])
+	    epxy:set(SID++".uapp_vsn", [{text,VersText}])
     end,
-
     case maps:get(status,Node,undefined) of
-	undefined -> 
+	undefined ->
 	    State;
-
 	flash ->
-	    disable_buttons(PDx,["hold","setup","factory","save","restore"]),
-	    disable_buttons(PDx,["go","upgrade"]),
-	    enable_buttons(PDx,["reset"]),
+	    disable_buttons(SID,["go","upgrade"]),
+	    enable_buttons(SID,["reset"]),
 	    State;
-	    
 	boot ->
-	    disable_buttons(PDx,["hold","setup","factory","save","restore"]),
-	    enable_buttons(PDx,["reset","go"]),
+	    enable_buttons(SID,["reset","go"]),
 	    case UAppMatch of
 		false ->
-		    disable_buttons(PDx,["upgrade"]);
+		    disable_buttons(SID,["upgrade"]);
 		_Match ->
-		    enable_buttons(PDx,["upgrade"])
+		    enable_buttons(SID,["upgrade"])
 	    end,
 	    State;
 	up ->
-	    enable_buttons(PDx, ["hold","setup","factory","save","restore"]),
-	    enable_buttons(PDx,["reset"]),
-	    disable_buttons(PDx,["go","upgrade"]),
+	    enable_buttons(SID, ["hold","reset"]),
+	    enable_buttons(SID,["setup","factory","save","restore"]),
 	    State
     end.
 
@@ -580,7 +592,6 @@ match_uapp_vsn(AppVersion, [{banks,Match,Bs}|Banks]) ->
 match_uapp_vsn(_AppVersion, []) ->
     false.
     
-
 action_sdo(State, Status, Index, Si, Value) ->
     case find_node_by_pos(State#state.selected_pos,State#state.nodes) of
 	false ->
@@ -598,7 +609,6 @@ action_sdo(State, Status, Index, Si, Value) ->
 	    end
     end.
 
-
 -define(OUTPUT_FLAG_OUTACT,      16#0020).
 -define(OUTPUT_FLAG_ANLOAD,      16#0800).
 -define(OUTPUT_FLAG_VALUE,       16#1000).
@@ -607,7 +617,6 @@ action_sdo(State, Status, Index, Si, Value) ->
 -define(INPUT_ANALOG,            16#0002).
 -define(INPUT_DIGITAL,           16#0004).
 -define(INPUT_ENCODER,           16#0008).
-
 
 %%
 %% powerZone test setup
@@ -679,23 +688,63 @@ event(Signal,ID,Env) ->
     ?dbg("Got event callback ~p\n", [{Signal,ID,Env}]),
     ?SERVER ! {Signal,ID,Env}.
 
-%% show the row 
-select_row(Row) ->
-    RowID = "nodes.r"++integer_to_list(Row),
-    epxy:set(RowID,[{hidden,false}]).
-
 deselect_row(undefined, State) ->
     State;
 deselect_row(Pos, State) ->
-    case State#state.selected_id of
+    case selected_id(Pos,State) of
 	undefined ->
 	    ok;
-	ID ->
+	SID ->
 	    RowID = "nodes.r"++integer_to_list(Pos),
-	    epxy:set(ID,[{hidden,all},{disabled,all}]),
+	    io:format("HIDE (row) id=~p\n", [SID]),
+	    epxy:set(SID,[{hidden,all},{disabled,all}]),
 	    epxy:set(RowID,[{hidden,true}])
     end,
-    State#state { selected_pos=undefined, selected_id=undefined }.
+    State#state { selected_pos=undefined }.
+
+%% show the row 
+highlight_row(Row) ->
+    RowID = "nodes.r"++integer_to_list(Row),
+    epxy:set(RowID,[{hidden,false}]).
+
+hide_if_selected(Serial,State) ->
+    case is_selected_by_serial(Serial,State) of
+	true ->
+	    hide(State);
+	false ->
+	    ok
+    end.
+
+hide(State) ->
+    hide_pos(State#state.selected_pos, State).
+hide_pos(Pos, State) ->
+    case selected_id(Pos,State) of
+	undefined ->
+	    ok;
+	SID ->
+	    io:format("HIDE id=~p\n", [SID]),
+	    epxy:set(SID,[{hidden,all},{disabled,all}])
+    end.
+
+show_if_selected(Serial,State) ->
+    case is_selected_by_serial(Serial,State) of
+	true ->
+	    show(State);
+	false ->
+	    ok
+    end.
+
+show(State) ->
+    show_pos(State#state.selected_pos, State).
+show_pos(Pos, State) ->
+    case selected_id(Pos,State) of
+	undefined ->
+	    ok;
+	SID ->
+	    io:format("SHOW id=~p\n", [SID]),
+	    epxy:set(SID,[{hidden,false},{disabled,false}])
+    end.
+
 
 %% Node table
 %% +------+---+----------+---+--------+
@@ -703,19 +752,34 @@ deselect_row(Pos, State) ->
 %% +------+---+----------+---+--------+
 %% |801001|100|bridgeZone|2.3|  Boot  |
 %% +------+---+----------+---+--------+
+%%
+%% +------+---+----------+---+--------+
+%% |USB1  |   |          |   |  scan  |
+%% +------+---+----------+---+--------+
+%%
 
 node_table(W,_H) ->
     {TxW,TxH} = text_cell_dimension(),
     XOffs = 8,
     YOffs = 8,
-    NRows = 16,
+    NRows = ?NUM_TABLE_NODES+1,
     ID = "nodes",
     TabX = table_header(ID,TxW,TxH,W),
     TabWidth = TabX - XOffs,
     %% create parent after header, order only important at the time of draw
     table(ID,XOffs,YOffs,TabWidth,NRows*TxH),
     [table_row(ID,I,TxW,TxH,W) || I <- lists:seq(1,NRows)],
-    {XOffs,YOffs,TxH}.
+    set_text(serial,?NUM_TABLE_NODES+1,"USB1"),
+    set_text(id,?NUM_TABLE_NODES+1,"1"),
+    set_text(product,?NUM_TABLE_NODES+1,"FTDI"),
+    set_text(vsn,?NUM_TABLE_NODES+1,"1.1"),
+    set_text(status,?NUM_TABLE_NODES+1,scan),
+    LPC = #{ pos => ?NUM_TABLE_NODES+1,
+	     serial => "USB1",
+	     product => lpc,
+	     vsn     => {0,0},
+	     status  => scan },
+    {XOffs,YOffs,TxH,LPC}.
 
 %% install table header return next X location
 table_header(Parent,TxW,TxH,_W) ->
@@ -933,10 +997,10 @@ uBoot(X,Y,_W,_H) ->
     YGap = ?GROUP_FONT_SIZE,
     Y0 = YGap,
     X1 = XGap,
-    ID = "uboot",
+    ID = "ubt",
 
-    {X11,Y1,W0,H0} = tagged_text("uboot.app_vsn", "Version", X1, Y0),
-    {_,_,W1,_} = tagged_text("uboot.uapp_vsn", "UApp", X11+XGap, Y0),
+    {X11,Y1,W0,H0} = tagged_text("ubt.app_vsn", "Version", X1, Y0),
+    {_,_,W1,_} = tagged_text("ubt.uapp_vsn", "UApp", X11+XGap, Y0),
 
     {W6,H6} = add_uboot_buttons(ID, X1, Y1+YGap),
 
@@ -968,13 +1032,32 @@ lpcBoot(X,Y,_W,_H) ->
     {_,Y4,W3,H3} = tagged_text("lpc.ramSize", "RamSize", X1, Y3+YGap),
     {_,Y5,W4,H4} = tagged_text("lpc.flashSectors", "Sectors", X1, Y4+YGap),
     {_,Y6,W5,H5} = tagged_text("lpc.maxCopySize", "MaxCopySize", X1, Y5+YGap),
-    {_,_Y7,W6,H6} = tagged_text("lpc.variant", "Variant", X1, Y6+YGap),
-    
-    Wt = XGap+lists:max([W0,W1,W2,W3,W4,W5,W6])+XGap,
-    Ht = YGap+lists:sum([H0,H1,H2,H3,H4,H5,H6])+7*YGap,
+    {_,Y7,W6,H6} = tagged_text("lpc.variant", "Variant", X1, Y6+YGap),
+
+    {W7,H7} = add_lpc_buttons(ID, X1, Y7+YGap, 0, 0),
+
+    Wt = XGap+lists:max([W0,W1,W2,W3,W4,W5,W6,W7])+XGap,
+    Ht = YGap+lists:sum([H0,H1,H2,H3,H4,H5,H6,H7])+8*YGap,
 
     group_rectangle(ID,"lpcBoot",X,Y,Wt,Ht,all),
     ok.
+
+%% add hold and go buttons
+add_lpc_buttons(ID, X, Y, _W, _H) ->
+    W = ?BUTTON_WIDTH,
+    H = ?BUTTON_HEIGHT,
+    YGap = 10,
+    XGap = 8,
+    X0 = X,
+    X1 = X0 + W + XGap,
+    X2 = X1 + W + XGap,
+    X3 = X2 + W + XGap,
+    Y0 = Y,
+    add_text_button(ID++".lpc_go",      "Go",      X0, Y0, W, H),
+    add_text_button(ID++".lpc_flash",   "Flash",   X1, Y0, W, H),
+    add_text_button(ID++".lpc_reset",   "Reset",   X2, Y0, W, H),
+    add_text_button(ID++".lpc_scan",    "Scan",    X3, Y0, W, H),
+    {4*W+1*XGap,1*H+1*YGap}.
 
 %% add hold and go buttons
 add_uboot_buttons(ID, X, Y) ->
@@ -1014,13 +1097,14 @@ add_buttons(ID, X, Y) ->
     {4*W+3*XGap,2*H+2*YGap}.
 
 add_text_button(ID, Text, X, Y, W, H) ->
+    FontSpec = [{name,"Arial"},{weight,bold},{size,?BUTTON_FONT_SIZE}],
+    {ok,Font} = epx_font:match(FontSpec),
     epxy:new(ID,
 	     [{type,button},
 	      {halign,center},
 	      {x,X},{y,Y},{width,W},{height,H},
 	      {shadow_x,2},{shadow_y,2},{children_first,false},
-	      {font,[{name,"Arial"},{weight,bold},
-		     {size,?BUTTON_FONT_SIZE}]},
+	      {font,Font},
 	      {fill,solid},{color,lightgray},
 	      {text,Text}
 	     ]),
@@ -1272,20 +1356,22 @@ group_rectangle(ID,Text,X,Y,W,H,Status) ->
 	      {height,10}  %% width,25
 	     ]).
 
-tagged_text(ID, TagText, X, Y) ->
-    XOffs = length(TagText)*10,
+tagged_text(ID,TagText,X,Y) ->
+    FontSpec = [{name,"Arial"},{slant,roman},{size,?GROUP_FONT_SIZE}],
+    {ok,Font} = epx_font:match(FontSpec),
+    {Wt,Ht} = epx_font:dimension(Font,TagText),
+    XOffs = Wt+4,
+    H = Ht+2,
     W = 8*10,
-    H = 12,
     epxy:new(ID,
 	     [{type,text},
-	      {font,[{name,"Arial"},{slant,roman},
-		     {size,?GROUP_FONT_SIZE}]},
+	      {font,Font},
 	      {font_color, black},
 	      {text,""},
 	      {color,white},{fill,solid},
 	      {halign,left},
 	      {x,X+XOffs},{y,Y},
-	      {height,10}, {width,W}
+	      {height,Ht}, {width,W}
 	     ]),
     epxy:new(ID++".border",
 	     [{type,rectangle},
@@ -1294,8 +1380,7 @@ tagged_text(ID, TagText, X, Y) ->
 	      {width,W+2},{height,H+2}]),
     epxy:new(ID++".tag",
 	     [{type,text},
-	      {font,[{name,"Arial"},{slant,roman},
-		     {size,?GROUP_FONT_SIZE}]},
+	      {font,Font},
 	      {font_color, black},
 	      {text,TagText},
 	      {color,white},{fill,solid},
@@ -1303,7 +1388,7 @@ tagged_text(ID, TagText, X, Y) ->
 	      {x,-XOffs},{y,0},
 	      {height,10}
 	     ]),
-    {X+XOffs+W+2,Y+H,XOffs+W,H}.
+    {X+XOffs+W+2,Y+H,XOffs+W+2,H}.
 
 send_digital2(CobId, Si, Value) ->
     send_pdo2_tx(CobId,?MSG_DIGITAL,Si,Value).
@@ -1435,27 +1520,31 @@ sdo_value(1,3,<<Value:8/little,_:24>>) -> Value.
 
 node_booted(_CobID, Serial, State) ->
     ?dbg("Node ~s booted\n", [integer_to_list(Serial,16)]),
+    hide_if_selected(Serial,State),
+    SID = selected_id(State),
     Nodes = set_status_by_serial(Serial, boot, State#state.nodes),
-    io:format("hold=~w, Nodes = ~p\n", [State#state.hold_mode, Nodes]),
-    if State#state.hold_mode ->
-	    XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
-	    WDT = 0,
-	    co_sdo_cli:send_sdo_set(XCobId, ?INDEX_UBOOT_HOLD, 0, WDT),
-	    State1 = State#state { nodes=Nodes, 
-				   sdo_request={?INDEX_UBOOT_HOLD, 0},
-				   hold_mode=false },
-	    State2 = refresh_node_state(State1),
-	    {noreply, State2};
-       true ->
-	    State1 = State#state { nodes=Nodes },
-	    State2 = refresh_node_state(State1),
-	    {noreply,State2}
-    end.
+    State1 = State#state { nodes=Nodes },
+    State3 = 
+	if State1#state.hold_mode ->
+		XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
+		WDT = 0,
+		co_sdo_cli:send_sdo_set(XCobId, ?INDEX_UBOOT_HOLD, 0, WDT),
+		State2 = State1#state { sdo_request={?INDEX_UBOOT_HOLD, 0},
+					hold_mode=false },
+		refresh_node_state(State2);
+	   true ->
+		refresh_node_state(State1)
+	end,
+    show_if_selected(Serial,State3),
+    {noreply,State3}.
 
 
 node_started(_CobId, Serial, State) ->
     ?dbg("Node ~6.16.0B started\n", [Serial]),
+    hide_if_selected(Serial,State),
     Nodes = set_status_by_serial(Serial, up, State#state.nodes),
+    State1 = State#state { nodes=Nodes },
+    show_if_selected(Serial,State1),
     spawn(
       fun() ->
 	      XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
@@ -1464,7 +1553,6 @@ node_started(_CobId, Serial, State) ->
 	      co_sdo_cli:send_sdo_get(XCobId, ?IX_IDENTITY_OBJECT, ?SI_IDENTITY_PRODUCT)
 	      %% ...
       end),
-    State1 = State#state { nodes=Nodes },
     State2 = refresh_node_state(State1),
     {noreply,State2}.
 
@@ -1507,9 +1595,10 @@ node_message(CobID, Index, Si, Value, State) ->
 node_data(Index, Si, Value, State) ->
     case Index of
 	?MSG_ANALOG ->
+	    SID = selected_id(State),
 	    ?dbg("MSG_ANALOG: [~s], si=~w, value=~w\n",
-		 [State#state.selected_id,Si,Value]),
-	    case State#state.selected_id of
+		 [SID,Si,Value]),
+	    case SID of
 		"pdb" ->
 		    case Si of
 			37 -> set_value("pdb.ain.e37", Value);
@@ -1553,9 +1642,10 @@ node_data(Index, Si, Value, State) ->
 	    end;
 
 	?MSG_DIGITAL ->
+	    SID = selected_id(State),
 	    ?dbg("MSG_DIGITAL: [~s], si=~w, value=~w\n", 
-		 [State#state.selected_id,Si,Value]),
-	    case State#state.selected_id of
+		 [SID,Si,Value]),
+	    case SID of
 		"pdb" ->
 		    case Si of
 			33 -> set_value("pdb.din.e33", Value);
@@ -1585,9 +1675,10 @@ node_data(Index, Si, Value, State) ->
 	    end;
 
 	?MSG_OUTPUT_ACTIVE ->
+	    SID = selected_id(State),
 	    ?dbg("MSG_OUTPUT_ACTIVE: [~s], si=~w, value=~w\n", 
-		 [State#state.selected_id,Si,Value]),
-	    case State#state.selected_id of
+		 [SID,Si,Value]),
+	    case SID of
 		"pdb" ->
 		    case Si of
 			1 -> switch_state("pdb.pout.e1.onoff",Value);
@@ -1636,8 +1727,9 @@ node_data(Index, Si, Value, State) ->
 	    _OnOff = (Value bsr 24) band 16#ff,
 	    _OutSt = (Value bsr 16) band 16#ff,
 	    _Duty  = Value band 16#ffff,
+	    _SID = selected_id(State),
 	    ?dbg("MSG_OUTPUT_STATE: [~s], si=~w,on=~w,state=~w,duty=~w\n", 
-		 [State#state.selected_id,Si,_OnOff,_OutSt,_Duty]),
+		 [_SID,Si,_OnOff,_OutSt,_Duty]),
 	    case Si of
 		%% bridge zone: Pout=1-4, Aout =5-6, Dout=7-10
 		%% ioZone:      Dout=1-8
@@ -1648,6 +1740,45 @@ node_data(Index, Si, Value, State) ->
 	    ignore
     end,
     {noreply,State}.
+
+is_selected_by_serial(Serial, State) ->
+    case find_node_by_serial(Serial, State#state.nodes) of
+	false ->
+	    false;
+	Node ->
+	    maps:get(pos,Node) =:= State#state.selected_pos
+    end.
+
+selected_status(State) ->
+    selected_status(State#state.selected_pos,State).
+selected_status(Pos,State) ->
+    case find_node_by_pos(Pos,State#state.nodes) of
+	false -> undefined;
+	Node -> maps:get(status,Node,undefined)
+    end.
+
+selected_id(State) ->
+    selected_id(State#state.selected_pos,State).
+selected_id(Pos,State) ->
+    case find_node_by_pos(Pos,State#state.nodes) of
+	false -> undefined;
+	Node ->
+	    case maps:get(status,Node,undefined) of
+		undefined -> undefined;
+		scan -> "lpc";
+		up ->
+		    case maps:get(product,Node,undefined) of
+			undefined -> undefined;
+			powerZone ->   "pds";
+			ioZone ->      "pdi";
+			bridgeZone ->  "pdb";
+			controlZone -> "pdc";
+			_ -> undefined
+		    end;
+		boot  -> "ubt";
+		flash -> "ubt"
+	    end
+    end.
 
 switch_state(ID,0) ->
     epxy:set(ID,[{color,lightgray},{text,"OFF"}]);
@@ -1663,7 +1794,7 @@ set_status_by_serial(Serial, Status, Ns) ->
 	    set_text(status,Pos,Status),
 	    [ N#{ status => Status } | Ns1];
 	false ->
-	    Pos = length(Ns)+1,
+	    Pos = allocate_node_pos(Ns),
 	    set_text(status,Pos,Status),
 	    set_text(serial,Pos,Serial),
 	    Node = #{ pos => Pos, serial => Serial, status => Status },
@@ -1702,17 +1833,25 @@ set_value_by_cobid(CobId,Index,SubInd,Value,State) ->
 
 set_by_cobid(CobID,Key,Value,State) ->
     State1 = set_by_cobid_(CobID,Key,Value,State),
+    Status = selected_status(State),
+    Status1 = selected_status(State1),
+    if Status =:= Status1 ->
+	    ok;
+       true ->
+	    hide(State),
+	    show(State1)
+    end,
     refresh_node_state(State1).
 
 set_by_cobid_(CobID,Key,Value,State) ->
-    io:format("set_by_cobid: key=~p, value=~p\n", [Key,Value]),
+    %% ?dbg("set_by_cobid: key=~p, value=~p\n", [Key,Value]),
     case ?is_cobid_extended(CobID) of
 	true ->
 	    Serial = ?XNODE_ID(CobID),
 	    Ns = State#state.nodes,
 	    case take_node_by_serial(Serial, Ns) of
 		false ->
-		    Pos = length(Ns)+1,
+		    Pos = allocate_node_pos(Ns),
 		    set_text(serial,Pos,Serial),
 		    set_text(Key,Pos,Value),
 		    N = #{ pos=>Pos, serial=>Serial, Key=>Value },
@@ -1727,7 +1866,7 @@ set_by_cobid_(CobID,Key,Value,State) ->
 	    Ns = State#state.nodes,
 	    case take_node_by_id(ID, Ns) of
 		false ->
-		    Pos = length(Ns)+1,
+		    Pos = allocate_node_pos(Ns),
 		    set_text(id,Pos,ID),
 		    set_text(Key,Pos,Value),
 		    N = #{ pos=>Pos, id=>ID, Key=>Value },
@@ -1737,6 +1876,18 @@ set_by_cobid_(CobID,Key,Value,State) ->
 		    N1 = N#{ Key => Value },
 		    State#state { nodes=[N1|Ns1]}
 	    end
+    end.
+
+allocate_node_pos(Ns) ->
+    PosList = [ maps:get(pos,N) || N <- Ns] -- [(?NUM_TABLE_NODES+1)],
+    io:format("PosList = ~w\n", [PosList]),
+    Next = if PosList =:= [] -> 1;
+	      true -> lists:max(PosList)+1
+	   end,
+    if Next >= ?NUM_TABLE_NODES ->
+	    ?NUM_TABLE_NODES;  %% FIXME: find free pos
+       true ->
+	    Next
     end.
 
 %% set text value in nodes table
@@ -1751,8 +1902,10 @@ set_text(Key,Pos,Value) ->
 	    ok
     end.
 
-format_value(serial,Value) -> 
+format_value(serial,Value) when is_integer(Value) ->
     tl(integer_to_list(16#1000000+Value, 16));
+format_value(serial,Value) when is_list(Value) ->
+    Value;
 format_value(vsn,{Major,Minor}) ->
     integer_to_list(Major)++"."++integer_to_list(Minor);
 format_value(app_vsn,{{Year,Mon,Day},{_H,_M,_S}}) ->
@@ -1773,15 +1926,12 @@ format_value(_Key,Int) when is_integer(Int) -> integer_to_list(Int);
 format_value(_Key,Text) when is_atom(Text) -> Text;
 format_value(_Key,Text) when is_list(Text) -> Text.
 
-
 is_node_item(serial) -> true;
 is_node_item(id) -> true;
 is_node_item(product) -> true;
 is_node_item(vsn) -> true;
 is_node_item(status) -> true;
 is_node_item(_) -> false.
-
-
 
 %% find node with Serial
 take_node_by_serial(Serial, Ns) ->
@@ -1804,7 +1954,6 @@ take_node_by_id(Id, [Node|Ns], Ms) ->
     take_node_by_id(Id, Ns, [Node|Ms]);
 take_node_by_id(_Id, [], _Ms) ->
     false.
-
 
 find_node_by_pos(Pos, Ns) ->  find_node_by_key(pos, Pos, Ns).
 find_node_by_serial(Serial, Ns) -> find_node_by_key(serial, Serial, Ns).
