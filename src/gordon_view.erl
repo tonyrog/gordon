@@ -46,7 +46,9 @@
 	  sdo_error,       %% last sdo_error
 	  row_height = 1,  %% height of row selection area
 	  firmware = [],   %% list of available firmware for upgrade
-	  nodes = []       %% list of node maps
+	  nodes = [],      %% list of node maps
+	  elpc,            %% Elpc options
+	  elpc_info = []   %% Elpc last scanned info
 	}).
 
 -define(TEXT_CELL_FONT_SIZE, 18).
@@ -56,12 +58,14 @@
 -define(ALOAD_FONT_SIZE, 14).
 -define(BUTTON_FONT_SIZE, 16).
 -define(ONOFF_FONT_SIZE, 14).
+-define(ONOFF_ROUND_WH, 4).
 -define(GROUP_FONT_SIZE, 12).
 -define(SLIDER_WIDTH,  100).
 -define(SLIDER_HEIGHT, 8).
 -define(ONOFF_WIDTH, 40).
 -define(BUTTON_WIDTH, 72).
 -define(BUTTON_HEIGHT, 18).
+-define(BUTTON_ROUND_WH, 4).
 
 -define(NUM_TABLE_NODES, 16).
 
@@ -172,7 +176,13 @@ init(Options) ->
 
     Firmware = load_firmware(),
 
-    {ok, #state{ row_height = RowHeight, firmware = Firmware, nodes = [LPC] }}.
+    Elpc = case application:get_env(gordon, elpc) of
+	       {ok,ElpcEnv} -> ElpcEnv;
+	       undefined -> undefined
+	   end,
+    set_elpc_row(Elpc),
+    {ok, #state{ row_height = RowHeight, firmware = Firmware, nodes = [LPC],
+		 elpc = Elpc }}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -418,19 +428,45 @@ handle_info({button,[_,_,_|".restore"],[{value,1}]},State) ->
     {noreply, action_sdo(State,up,?IX_RESTORE_DEFAULT_PARAMETERS,1,<<"daol">>)};
 
 handle_info({button,[_,_,_|".lpc_scan"],[{value,1}]},State) ->
-    %% test fill in LPC 2129 data
-    case lists:keyfind("2129", #device_type.product, elpcisp:lpc_types()) of
-	false ->
-	    {noreply, State};
-	D ->
-	    epxy:set("lpc.vsn", [{text,format_value(vsn,{1,65})}]),
-	    epxy:set("lpc.product", [{text,D#device_type.product}]),
-	    epxy:set("lpc.flashSize", [{text,format_value(flashSize,D#device_type.flashSize)}]),
-	    epxy:set("lpc.ramSize", [{text,format_value(ramSize,D#device_type.ramSize)}]),
-	    epxy:set("lpc.flashSectors", [{text,format_value(flashSectors,D#device_type.flashSectors)}]),
-	    epxy:set("lpc.maxCopySize", [{text,format_value(maxCopySize,D#device_type.maxCopySize)}]),
-	    epxy:set("lpc.variant", [{text,format_value(variant,D#device_type.variant)}]),
-	    {noreply, State}
+    if State#state.uart =:= undefined, 
+       is_list(State#state.elpc) ->
+	    Elpc = State#state.elpc,
+	    ElpcDevice = proplists:get_value(device,Elpc),
+	    ElpcBaud   = proplists:get_value(baud,Elpc,38400),
+	    ElpcControl = proplists:get_value(control,Elpc,false),
+	    ElpcControlSwap = proplists:get_value(control_swap,Elpc,false),
+	    ElpcControlInv = proplists:get_value(control_inv,Elpc,false),
+	    put(control, ElpcControl),
+	    put(control_swap, ElpcControlSwap),
+	    put(control_inv, ElpcControlInv),
+	    set_elpc_status(sync),
+	    case elpcisp:open(ElpcDevice, ElpcBaud) of
+		{ok,U} ->
+		    case elpcisp:sync(U, 3) of
+			{ok,_} ->
+			    Info = elpcisp:info(U),
+			    set_elpc_info(Info),
+			    set_elpc_status(idle),
+			    {noreply, State#state { uart = U,
+						    elpc_info = Info }};
+			_Error ->
+			    set_elpc_status(error),
+			    set_elpc_info([]),
+			    {noreply, State}
+		    end;
+		_Error ->
+		    set_elpc_status(error),
+		    set_elpc_info([]),
+		    {noreply, State}
+	    end;
+       is_port(State#state.uart) ->
+	    Info = elpcisp:info(State#state.uart),
+	    set_elpc_info(Info),
+	    {noreply, State#state { elpc_info = Info }};
+       true ->
+	    Info = fake_info(),
+	    set_elpc_info(Info),
+	    {noreply, State#state { elpc_info = Info }}
     end;
 
 handle_info({button,_ID,[{value,0}]},State) ->
@@ -497,6 +533,77 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
+fake_info() ->
+    case lists:keyfind("2129", #device_type.product, elpcisp:lpc_types()) of
+	false -> 
+	    [];
+	D ->
+	    [{version,{1,65}},
+	     {product,D#device_type.product},
+	     {flashSize,D#device_type.flashSize},
+	     {ramSize,D#device_type.ramSize},
+	     {flashSectors,D#device_type.flashSectors},
+	     {maxCopySize,D#device_type.maxCopySize},
+	     {variant,D#device_type.variant}]
+    end.
+
+set_elpc_row(Elpc) ->
+    ElpcDevice = proplists:get_value(device,Elpc),
+    {Manuf0,Prod0,Serial0} = get_name_info(ElpcDevice),
+    Manuf = trunc_text(Manuf0,4),
+    Prod  = trunc_text(Prod0,12),
+    Serial = trunc_text(Serial0,8),
+    set_text(serial,?NUM_TABLE_NODES+1,Serial),
+    set_text(id,?NUM_TABLE_NODES+1,Manuf),
+    set_text(product,?NUM_TABLE_NODES+1,Prod),
+    set_text(vsn,?NUM_TABLE_NODES+1,"1.0"),
+    set_elpc_status(idle).
+
+trunc_text(Text,MaxLen) ->
+    string:substr(Text, 1, MaxLen).
+
+get_name_info("/dev/serial/by-id/usb-"++Name) ->
+    %% remove port info part
+    Name1 = case string:chr(Name, $-) of
+		0 -> Name;
+		I -> string:substr(Name,1,I-1)
+	    end,
+    %% extract serial from name
+    Ts = string:tokens(Name1,"_"),
+    {Serial,Ts1} = case lists:reverse(Ts) of
+		       [Ser|RTs2] -> {Ser,lists:reverse(RTs2)};
+		       _ -> {"", Ts}
+		   end,
+    %% rest is normally manuf and product
+    case Ts1 of
+	["Silicon","Labs" | Prod] ->
+	    {"Silicon_Labs", string:join(Prod,"_"), Serial};
+	[Manuf | Prod] ->
+	    {Manuf, string:join(Prod,"_"), Serial}
+    end;
+get_name_info("/dev/"++Name) ->
+    {"","USB",Name}.
+
+
+set_elpc_status(Status) ->
+    set_text(status,?NUM_TABLE_NODES+1,Status).
+
+set_elpc_info(Info) ->
+    Vsn = proplists:get_value(version, Info),
+    Product = proplists:get_value(product, Info),
+    FlashSize = proplists:get_value(flashSize, Info),
+    RamSize = proplists:get_value(ramSize, Info),
+    FlashSectors = proplists:get_value(flashSectors, Info),
+    MaxCopySize = proplists:get_value(maxCopySize, Info),
+    Variant = proplists:get_value(variant, Info),
+    epxy:set("lpc.vsn", [{text,format_value(vsn,Vsn)}]),
+    epxy:set("lpc.product", [{text,Product}]),
+    epxy:set("lpc.flashSize", [{text,format_value(flashSize,FlashSize)}]),
+    epxy:set("lpc.ramSize", [{text,format_value(ramSize,RamSize)}]),
+    epxy:set("lpc.flashSectors", [{text,format_value(flashSectors,FlashSectors)}]),
+    epxy:set("lpc.maxCopySize", [{text,format_value(maxCopySize,MaxCopySize)}]),
+    epxy:set("lpc.variant", [{text,format_value(variant,Variant)}]),
+    ok.
 
 %% FIXME: update button status according to state
 %%  upgrade iff state=boot and firmware is available and correct
@@ -769,11 +876,7 @@ node_table(W,_H) ->
     %% create parent after header, order only important at the time of draw
     table(ID,XOffs,YOffs,TabWidth,NRows*TxH),
     [table_row(ID,I,TxW,TxH,W) || I <- lists:seq(1,NRows)],
-    set_text(serial,?NUM_TABLE_NODES+1,"USB1"),
-    set_text(id,?NUM_TABLE_NODES+1,"1"),
-    set_text(product,?NUM_TABLE_NODES+1,"FTDI"),
-    set_text(vsn,?NUM_TABLE_NODES+1,"1.1"),
-    set_text(status,?NUM_TABLE_NODES+1,scan),
+
     LPC = #{ pos => ?NUM_TABLE_NODES+1,
 	     serial => "USB1",
 	     product => lpc,
@@ -896,8 +999,8 @@ bridgeZone(X,Y,_W,_H) ->
     X1 = XGap,
     ID = "pdb",
 
-    {X11,Y1,_W0,H0} = tagged_text("pdb.app_vsn", "Version", X1, Y0),
-    {_,_,_,_} = tagged_text("pdb.uapp_vsn", "UApp", X11+XGap, Y0),
+    {X11,Y1,_W0,H0} = tagged_text("pdb.app_vsn", "Version", X1, Y0, 0),
+    {_,_,_,_} = tagged_text("pdb.uapp_vsn", "UApp", X11+XGap, Y0, 0),
 
     %% Aout x 2 (row=Y1,column X1)
     {_,Y2,W1,H1} = aout_group("pdb.aout", 5, 6, X1, Y1+YGap),
@@ -931,8 +1034,8 @@ ioZone(X,Y,_W,_H) ->
     X2 = X1+64,
     ID = "pdi",
 
-    {X11,Yn,_W0,H0} = tagged_text("pdi.app_vsn", "Version", X1, Y0),
-    {_,_,_,_} = tagged_text("pdi.uapp_vsn", "UApp", X11+XGap, Y0),
+    {X11,Yn,_W0,H0} = tagged_text("pdi.app_vsn", "Version", X1, Y0, 0),
+    {_,_,_,_} = tagged_text("pdi.uapp_vsn", "UApp", X11+XGap, Y0, 0),
     Y1 = Yn,
 
     %% Din x 12 (row Y3,column=X1) support iozone24?
@@ -960,8 +1063,8 @@ powerZone(X,Y,_W,_H) ->
     X1 = XGap,
     ID = "pds",
 
-    {X11,Y1,_W0,H0} = tagged_text("pds.app_vsn", "Version", X1, Y0),
-    {_,_,_,_} = tagged_text("pds.uapp_vsn", "UApp", X11+XGap, Y0),
+    {X11,Y1,_W0,H0} = tagged_text("pds.app_vsn", "Version", X1, Y0, 0),
+    {_,_,_,_} = tagged_text("pds.uapp_vsn", "UApp", X11+XGap, Y0, 0),
 
     %% Ain x 8 (row=Y1,column=X1)
     {_,_Y3,W2,H2} = ain_group("pds.ain", 1, 8, X1, Y1+YGap),
@@ -999,8 +1102,8 @@ uBoot(X,Y,_W,_H) ->
     X1 = XGap,
     ID = "ubt",
 
-    {X11,Y1,W0,H0} = tagged_text("ubt.app_vsn", "Version", X1, Y0),
-    {_,_,W1,_} = tagged_text("ubt.uapp_vsn", "UApp", X11+XGap, Y0),
+    {X11,Y1,W0,H0} = tagged_text("ubt.app_vsn", "Version", X1, Y0, 0),
+    {_,_,W1,_} = tagged_text("ubt.uapp_vsn", "UApp", X11+XGap, Y0, 0),
 
     {W6,H6} = add_uboot_buttons(ID, X1, Y1+YGap),
 
@@ -1025,14 +1128,14 @@ lpcBoot(X,Y,_W,_H) ->
     Y0 = YGap,
     X1 = XGap,
     ID = "lpc",
-
-    {_,Y1,W0,H0} = tagged_text("lpc.vsn", "Version", X1, Y0),
-    {_,Y2,W1,H1} = tagged_text("lpc.product", "Product", X1, Y1+YGap),
-    {_,Y3,W2,H2} = tagged_text("lpc.flashSize", "FlashSize", X1, Y2+YGap),
-    {_,Y4,W3,H3} = tagged_text("lpc.ramSize", "RamSize", X1, Y3+YGap),
-    {_,Y5,W4,H4} = tagged_text("lpc.flashSectors", "Sectors", X1, Y4+YGap),
-    {_,Y6,W5,H5} = tagged_text("lpc.maxCopySize", "MaxCopySize", X1, Y5+YGap),
-    {_,Y7,W6,H6} = tagged_text("lpc.variant", "Variant", X1, Y6+YGap),
+    TW = 96,
+    {_,Y1,W0,H0} = tagged_text("lpc.vsn", "Version", X1, Y0, TW),
+    {_,Y2,W1,H1} = tagged_text("lpc.product", "Product", X1, Y1+YGap, TW),
+    {_,Y3,W2,H2} = tagged_text("lpc.flashSize", "FlashSize", X1, Y2+YGap, TW),
+    {_,Y4,W3,H3} = tagged_text("lpc.ramSize", "RamSize", X1, Y3+YGap, TW),
+    {_,Y5,W4,H4} = tagged_text("lpc.flashSectors", "Sectors", X1, Y4+YGap, TW),
+    {_,Y6,W5,H5} = tagged_text("lpc.maxCopySize", "MaxCopySize",X1,Y5+YGap,TW),
+    {_,Y7,W6,H6} = tagged_text("lpc.variant", "Variant", X1, Y6+YGap,TW),
 
     {W7,H7} = add_lpc_buttons(ID, X1, Y7+YGap, 0, 0),
 
@@ -1057,7 +1160,7 @@ add_lpc_buttons(ID, X, Y, _W, _H) ->
     add_text_button(ID++".lpc_flash",   "Flash",   X1, Y0, W, H),
     add_text_button(ID++".lpc_reset",   "Reset",   X2, Y0, W, H),
     add_text_button(ID++".lpc_scan",    "Scan",    X3, Y0, W, H),
-    {4*W+1*XGap,1*H+1*YGap}.
+    {4*W+4*XGap,1*H+1*YGap}.
 
 %% add hold and go buttons
 add_uboot_buttons(ID, X, Y) ->
@@ -1104,6 +1207,7 @@ add_text_button(ID, Text, X, Y, W, H) ->
 	      {halign,center},
 	      {x,X},{y,Y},{width,W},{height,H},
 	      {shadow_x,2},{shadow_y,2},{children_first,false},
+	      {round_h,?BUTTON_ROUND_WH},{round_w,?BUTTON_ROUND_WH},
 	      {font,Font},
 	      {fill,solid},{color,lightgray},
 	      {text,Text}
@@ -1119,7 +1223,8 @@ aout_group(ID, Chan0, Chan1, X0, Y0) ->
     YGap   = 8,
     {Y2,W2} = lists:foldl(
 		fun(Chan, {Yi,Wi}) ->
-			{_,Y1,W1,_H1} = aout(ID,Chan,XLeft,Yi),
+			Num = (Chan - min(Chan1,Chan0))+1,
+			{_,Y1,W1,_H1} = aout(ID,Chan,Num,XLeft,Yi),
 			{Y1+YGap, max(Wi,W1)}
 		end, {YTop,0}, lists:seq(Chan0,Chan1,Step)),
     Y3 = Y0+(Y2-YGap)+YBot,
@@ -1136,7 +1241,8 @@ pout_group(ID, Chan0, Chan1, X0, Y0) ->
     YGap   = 8,
     {Y2,W2} = lists:foldl(
 		fun(Chan, {Yi,Wi}) ->
-			{_,Y1,W1,_H1} = pout(ID,Chan,XLeft,Yi),
+			Num = (Chan - min(Chan1,Chan0))+1,
+			{_,Y1,W1,_H1} = pout(ID,Chan,Num,XLeft,Yi),
 			{Y1+YGap, max(Wi,W1)}
 		end, {YTop,0}, lists:seq(Chan0,Chan1,Step)),
     Y3 = Y0+(Y2-YGap)+YBot,
@@ -1152,7 +1258,8 @@ ain_group(ID, Chan0, Chan1, X0, Y0) ->
     YGap   = 8,
     {Y2,W2} = lists:foldl(
 		fun(Chan, {Yi,Wi}) ->
-			{_,Y1,W1,_H1} = ain(ID,Chan,XLeft,Yi),
+			Num = (Chan - min(Chan1,Chan0))+1,
+			{_,Y1,W1,_H1} = ain(ID,Chan,Num,XLeft,Yi),
 			{Y1+YGap, max(Wi,W1)}
 		end, {YTop,0}, lists:seq(Chan0,Chan1,Step)),
     Y3 = Y0+(Y2-YGap)+YBot,
@@ -1168,7 +1275,8 @@ aload_group(ID, Chan0, Chan1, X0, Y0) ->
     YGap   = 8,
     {Y2,W2} = lists:foldl(
 		fun(Chan, {Yi,Wi}) ->
-			{_,Y1,W1,_H1} = aload(ID,Chan,XLeft,Yi),
+			Num = (Chan - min(Chan1,Chan0))+1,
+			{_,Y1,W1,_H1} = aload(ID,Chan,Num,XLeft,Yi),
 			{Y1+YGap, max(Wi,W1)}
 		end, {YTop,0}, lists:seq(Chan0,Chan1,Step)),
     Y3 = Y0+(Y2-YGap)+YBot,
@@ -1184,7 +1292,8 @@ din_group(ID, Chan0, Chan1, X0, Y0) ->
     YGap   = 8,
     {Y2,W2} = lists:foldl(
 		fun(Chan, {Yi,Wi}) ->
-			{_,Y1,W1,_H1} = din(ID,Chan,XLeft, Yi),
+			Num = (Chan - min(Chan1,Chan0))+1,
+			{_,Y1,W1,_H1} = din(ID,Chan,Num,XLeft,Yi),
 			{Y1+YGap, max(Wi,W1)}
 		end, {YTop,0}, lists:seq(Chan0,Chan1,Step)),
     Y3 = Y0+(Y2-YGap)+YBot,
@@ -1200,7 +1309,8 @@ dout_group(ID, Chan0, Chan1, X0, Y0) ->
     YGap   = 8,
     {Y2,W2} = lists:foldl(
 		fun(Chan, {Yi,Wi}) ->
-			{_,Y1,W1,_H1} = dout(ID,Chan,XLeft,Yi),
+			Num = (Chan - min(Chan1,Chan0))+1,
+			{_,Y1,W1,_H1} = dout(ID,Chan,Num,XLeft,Yi),
 			{Y1+YGap, max(Wi,W1)}
 		end, {YTop,0}, lists:seq(Chan0,Chan1,Step)),
     Y3 = Y0+(Y2-YGap)+YBot,
@@ -1210,29 +1320,42 @@ dout_group(ID, Chan0, Chan1, X0, Y0) ->
     {X0,Y3,W,H}.
 
 
-dout(ID0,Chan,X,Y) ->
+dout(ID0,Chan,Num,X,Y) ->
     ID = ID0++[$.,$e|integer_to_list(Chan)],
     W = ?ONOFF_WIDTH, H = ?ONOFF_FONT_SIZE,
+    LW = 12,
+    FontSpecL = [{name,"Arial"},{slant,roman},{size,?ONOFF_FONT_SIZE}],
+    FontSpec  = [{name,"Arial"},{weight,bold},{size,?ONOFF_FONT_SIZE}],
     epxy:new(ID,[{type,switch},
 		 {halign,center},
-		 {x,X},{y,Y},{width,W},{height,H},
+		 {x,X+LW},{y,Y},{width,W},{height,H},
 		 {shadow_x,2},{shadow_y,2},{children_first,false},
-		 {font,[{name,"Arial"},{weight,bold},{size,?ONOFF_FONT_SIZE}]},
+		 {round_h,?ONOFF_ROUND_WH},{round_w,?ONOFF_ROUND_WH},
+		 {font,FontSpec},
 		 {fill,solid},{color,lightgray},
 		 {text,"OFF"}
 		]),
+    epxy:new(ID++".label",[{type,text},
+			   {font,FontSpecL},
+			   {font_color,black},
+			   {x,-LW},{y,0},
+			   {width,10},{height,H},
+			   {halign,left},
+			   {text,integer_to_list(Num)}]),
     epxy:add_callback(ID,switch,?MODULE),
-    {X,Y+H,W,H}.
+    {X,Y+H,W+LW,H}.
 
-din(ID0,Chan,X,Y) ->
+din(ID0,Chan,Num,X,Y) ->
     ID = ID0++[$.,$e|integer_to_list(Chan)],
     W = 24, H = 14,
+    LW = 12,
+    FontSpecL = [{name,"Arial"},{slant,roman},{size,?ONOFF_FONT_SIZE}],
+    FontSpec = [{name,"Arial"},{weight,bold},{size,?DIN_FONT_SIZE}],
     epxy:new(ID,[{type,value},
 		 {halign,center},{valign,center},
-		 {x,X},{y,Y},{width,W},{height,H},
+		 {x,X+LW},{y,Y},{width,W},{height,H},
 		 {children_first,false},
-		 {font,[{name,"Arial"},{weight,bold},
-			{size,?DIN_FONT_SIZE}]},
+		 {font,FontSpec},
 		 {fill,solid},{color,white},
 		 {format,"~w"}
 		]),
@@ -1241,17 +1364,26 @@ din(ID0,Chan,X,Y) ->
 	      {color,black},
 	      {x,-1},{y,-1},
 	      {width,W+2},{height,H+2}]),
-    {X,Y+H,W,H}.
+    epxy:new(ID++".label",[{type,text},
+			   {font,FontSpecL},
+			   {font_color,black},
+			   {x,-LW},{y,0},
+			   {width,LW},{height,H},
+			   {halign,left},
+			   {text,integer_to_list(Num)}]),
+    {X,Y+H,W+LW,H}.
 
-ain(ID0,Chan,X,Y) ->
+ain(ID0,Chan,Num,X,Y) ->
     ID = ID0++[$.,$e|integer_to_list(Chan)],
     W = 40, H = ?AIN_FONT_SIZE,
+    LW = 12,
+    FontSpecL = [{name,"Arial"},{weight,medium},{size,?AIN_FONT_SIZE}],
+    FontSpec = [{name,"Arial"},{weight,bold},{size,?AIN_FONT_SIZE}],
     epxy:new(ID,[{type,value},
 		 {halign,center},{valign,center},
-		 {x,X},{y,Y},{width,W},{height,H},
+		 {x,X+LW},{y,Y},{width,W},{height,H},
 		 {children_first,false},
-		 {font,[{name,"Arial"},{weight,bold},
-			{size,?AIN_FONT_SIZE}]},
+		 {font,FontSpec},
 		 {fill,solid},{color,white},
 		 {format,"~.1f"},
 		 {value,0},
@@ -1262,18 +1394,27 @@ ain(ID0,Chan,X,Y) ->
 	      {color,black},
 	      {x,-1},{y,-1},
 	      {width,W+2},{height,H+2}]),
-    {X,Y+H,W,H}.
+    epxy:new(ID++".label",[{type,text},
+			   {font,FontSpecL},
+			   {font_color,black},
+			   {x,-LW},{y,0},
+			   {width,LW},{height,H},
+			   {halign,left},
+			   {text,integer_to_list(Num)}]),
+    {X,Y+H,W+LW,H}.
 
-aload(ID0,Chan,X,Y) ->
+aload(ID0,Chan,Num,X,Y) ->
     ID = ID0++[$.,$e|integer_to_list(Chan)],
     W = 32, H = ?ALOAD_FONT_SIZE,
+    LW = 12,
+    FontSpecL = [{name,"Arial"},{weight,medium},{size,?ALOAD_FONT_SIZE}],
+    FontSpec = [{name,"Arial"},{weight,bold},{size,?ALOAD_FONT_SIZE}],
     epxy:new(ID,
 	     [{type,value},
 	      {halign,center},{valign,center},
 	      {x,X},{y,Y},{width,W},{height,H},
 	      {children_first,false},
-	      {font,[{name,"Arial"},{weight,bold},
-		     {size,?ALOAD_FONT_SIZE}]},
+	      {font,FontSpec},
 	      {fill,solid},{color,white},
 	      {format,"~.2f"},
 	      {value,0},
@@ -1284,14 +1425,24 @@ aload(ID0,Chan,X,Y) ->
 	      {color,black},
 	      {x,-1},{y,-1},
 	      {width,W+2},{height,H+2}]),
-    {X,Y+H,W,H}.
+    epxy:new(ID++".label",[{type,text},
+			   {font,FontSpecL},
+			   {font_color,black},
+			   {x,-LW},{y,0},
+			   {width,LW},{height,H},
+			   {halign,left},
+			   {text,integer_to_list(Num)}]),
+    {X,Y+H,W+LW,H}.
     
-aout(ID0,Chan,X,Y) ->
+aout(ID0,Chan,Num,X,Y) ->
     ID = ID0++[$.,$e|integer_to_list(Chan)],
-    W = ?SLIDER_WIDTH+?ONOFF_WIDTH+16, H = ?ONOFF_FONT_SIZE,
-
+    W = ?SLIDER_WIDTH+?ONOFF_WIDTH+16, 
+    H = ?ONOFF_FONT_SIZE,
+    LW = 12,
+    FontSpecL = [{name,"Arial"},{weight,medium},{size,?ONOFF_FONT_SIZE}],
+    FontSpec = [{name,"Arial"},{weight,bold},{size,?ONOFF_FONT_SIZE}],
     epxy:new(ID,[{type,slider},
-		 {x,X+?ONOFF_WIDTH+16},{y,Y+2},
+		 {x,X+LW+?ONOFF_WIDTH+16},{y,Y+2},
 		 {width,?SLIDER_WIDTH},{height,?SLIDER_HEIGHT},
 		 {fill,solid},{color,lightBlue},
 		 {min,0},{max,65535},
@@ -1305,18 +1456,30 @@ aout(ID0,Chan,X,Y) ->
 		  {halign,center},
 		  {x,-(?ONOFF_WIDTH+16)},{y,-4},{width,?ONOFF_WIDTH},{height,H},
 		  {shadow_x,2},{shadow_y,2},{children_first,false},
-		  {font,[{name,"Arial"},{weight,bold},{size,?ONOFF_FONT_SIZE}]},
+		  {font,FontSpec},
 		  {fill,solid},{color,lightgray},
+		  {round_h,?ONOFF_ROUND_WH},{round_w,?ONOFF_ROUND_WH},
 		  {text,"OFF"}
 		 ]),
     epxy:add_callback(ID1,switch,?MODULE),
-    {X,Y+H,W,H}.
+    epxy:new(ID++".label",[{type,text},
+			   {font,FontSpecL},
+			   {font_color,black},
+			   {x,-(LW+?ONOFF_WIDTH+16)},{y,-4},
+			   {width,LW},{height,H},
+			   {halign,left},
+			   {text,integer_to_list(Num)}]),
+    {X,Y+H,W+LW,H}.
 
-pout(ID0,Chan,X,Y) ->
+pout(ID0,Chan,Num,X,Y) ->
     ID = ID0++[$.,$e|integer_to_list(Chan)],
-    W = ?SLIDER_WIDTH+?ONOFF_WIDTH+16, H = ?ONOFF_FONT_SIZE,
+    W = ?SLIDER_WIDTH+?ONOFF_WIDTH+16, 
+    H = ?ONOFF_FONT_SIZE,
+    LW = 12,
+    FontSpecL = [{name,"Arial"},{weight,medium},{size,?ONOFF_FONT_SIZE}],
+    FontSpec = [{name,"Arial"},{weight,bold},{size,?ONOFF_FONT_SIZE}],
     epxy:new(ID,[{type,slider},
-		 {x,X+?ONOFF_WIDTH+16},{y,Y+2},
+		 {x,X+LW+?ONOFF_WIDTH+16},{y,Y+2},
 		 {width,?SLIDER_WIDTH},{height,?SLIDER_HEIGHT},
 		 {fill,solid},{color,lightGreen},
 		 {min,0},{max,65535},
@@ -1330,12 +1493,20 @@ pout(ID0,Chan,X,Y) ->
 		  {halign,center},
 		  {x,-(?ONOFF_WIDTH+16)},{y,-4},{width,?ONOFF_WIDTH},{height,H},
 		  {shadow_x,2},{shadow_y,2},{children_first,false},
-		  {font,[{name,"Arial"},{weight,bold},{size,?ONOFF_FONT_SIZE}]},
+		  {font,FontSpec},
 		  {fill,solid},{color,lightgray},
+		  {round_h,?ONOFF_ROUND_WH},{round_w,?ONOFF_ROUND_WH},
 		  {text,"OFF"}
 		 ]),
     epxy:add_callback(ID1,switch,?MODULE),
-    {X,Y+H,W,H}.
+    epxy:new(ID++".label",[{type,text},
+			   {font,FontSpecL},
+			   {font_color,black},
+			   {x,-(LW+?ONOFF_WIDTH+16)},{y,-4},
+			   {width,LW},{height,H},
+			   {halign,left},
+			   {text,integer_to_list(Num)}]),
+    {X,Y+H,W+LW,H}.
 
 group_rectangle(ID,Text,X,Y,W,H,Status) ->
     epxy:new(ID,
@@ -1348,7 +1519,7 @@ group_rectangle(ID,Text,X,Y,W,H,Status) ->
 	     [{type,text},
 	      {font,[{name,"Arial"},{slant,roman},
 		     {size,?GROUP_FONT_SIZE}]},
-	      {font_color, black},
+	      {font_color,black},
 	      {text,Text},
 	      {color,white},{fill,solid},
 	      {halign,left},
@@ -1356,11 +1527,11 @@ group_rectangle(ID,Text,X,Y,W,H,Status) ->
 	      {height,10}  %% width,25
 	     ]).
 
-tagged_text(ID,TagText,X,Y) ->
+tagged_text(ID,TagText,X,Y,TagWidth) ->
     FontSpec = [{name,"Arial"},{slant,roman},{size,?GROUP_FONT_SIZE}],
     {ok,Font} = epx_font:match(FontSpec),
     {Wt,Ht} = epx_font:dimension(Font,TagText),
-    XOffs = Wt+4,
+    XOffs = max(Wt+4,TagWidth),
     H = Ht+2,
     W = 8*10,
     epxy:new(ID,
@@ -1521,7 +1692,6 @@ sdo_value(1,3,<<Value:8/little,_:24>>) -> Value.
 node_booted(_CobID, Serial, State) ->
     ?dbg("Node ~s booted\n", [integer_to_list(Serial,16)]),
     hide_if_selected(Serial,State),
-    SID = selected_id(State),
     Nodes = set_status_by_serial(Serial, boot, State#state.nodes),
     State1 = State#state { nodes=Nodes },
     State3 = 
