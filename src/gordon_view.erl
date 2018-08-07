@@ -547,6 +547,8 @@ fake_info() ->
 	     {variant,D#device_type.variant}]
     end.
 
+set_elpc_row(undefined) ->
+    ok;
 set_elpc_row(Elpc) ->
     ElpcDevice = proplists:get_value(device,Elpc),
     {Manuf0,Prod0,Serial0} = get_name_info(ElpcDevice),
