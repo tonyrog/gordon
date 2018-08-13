@@ -39,6 +39,7 @@
 	  uart,            %% serial flash uart device
 	  timer,           %% CANbus ping timer
 	  hold_mode=false, %% hold the (selected) booting node
+	  selected_tab,    %% "nodes" | "uarts" | undefined
 	  selected_pos,    %% Selected row | undefined
 	  selected_eff=0,  %% extended canid of selected node
 	  selected_sff=0,  %% short canid of selected node
@@ -47,8 +48,10 @@
 	  row_height = 1,  %% height of row selection area
 	  firmware = [],   %% list of available firmware for upgrade
 	  nodes = [],      %% list of node maps
+	  uarts = [],      %% list of uarts
 	  elpc,            %% Elpc options
-	  elpc_info = []   %% Elpc last scanned info
+	  dev_type,        %% Elpc devict type
+	  dev_info = []    %% Elpc last scanned info
 	}).
 
 -define(TEXT_CELL_FONT_SIZE, 18).
@@ -68,7 +71,7 @@
 -define(BUTTON_ROUND_WH, 4).
 
 -define(NUM_TABLE_NODES, 16).
-
+-define(NUM_TABLE_UARTS, 2).
 
 -define(TYPE_NONE,       16#00).
 -define(TYPE_BACKLIGHT,  16#81).
@@ -155,8 +158,10 @@ init(Options) ->
     epxy:add_callback("screen",event,?MODULE),
     Width  = proplists:get_value(width, Options, 800),
     Height = proplists:get_value(height, Options, 480),
-
-    {_XOffset,_YOffset,RowHeight,LPC} = node_table(Width div 2, Height),
+    XOffs = 8,
+    YOffs = 8,
+    {_X1,Y1,RH1} = node_table(XOffs,YOffs,Width div 2, Height),
+    {_X2,_Y2,_RH2} = uart_table(XOffs,Y1+2*YOffs,Width div 2, Height),
 
     %% define various layouts
     X = Width div 2,
@@ -180,9 +185,9 @@ init(Options) ->
 	       {ok,ElpcEnv} -> ElpcEnv;
 	       undefined -> undefined
 	   end,
-    set_elpc_row(Elpc),
-    {ok, #state{ row_height = RowHeight, firmware = Firmware, nodes = [LPC],
-		 elpc = Elpc }}.
+    UARTS = set_elpc_row(Elpc),
+    {ok, #state{ row_height = RH1, firmware = Firmware, 
+		 nodes = [], uarts = UARTS, elpc = Elpc }}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -262,21 +267,15 @@ handle_info({event,"screen",[{closed,true}]}, State) ->
 %% handle select in node list
 handle_info({select,"nodes.r"++RTxt,[{press,1},{x,_X},{y,_Y}|_]},State) ->
     Pos = list_to_integer(RTxt),
-    State1 = deselect_row(State#state.selected_pos,State),
+    State1 = deselect_row(State#state.selected_tab,
+			  State#state.selected_pos,State),
     ?dbg("deselect row=~w\n", [State#state.selected_pos]),
-    case selected_id(Pos,State1) of
+    Tab = "nodes",
+    case selected_id(Tab,Pos,State1) of
 	undefined ->
 	    {noreply, State1};
-	"lpc" ->
-	    highlight_row(Pos),
-	    State2 = State1#state { selected_pos = Pos,
-				    selected_eff = undefined,
-				    selected_sff =  undefined
-				    },
-	    show_pos(Pos,State2),
-	    {noreply, State2};
 	_SID ->
-	    Node = find_node_by_pos(Pos,State#state.nodes),
+	    Node = find_node_by_pos(Tab,Pos,State#state.nodes),
 	    Serial = maps:get(serial,Node,0),
 	    EFF = case Serial of
 		      0 -> 0;
@@ -286,18 +285,42 @@ handle_info({select,"nodes.r"++RTxt,[{press,1},{x,_X},{y,_Y}|_]},State) ->
 		      0 -> 0;
 		      M -> ?COB_ID(?PDO1_TX,M)
 		  end,
-	    State2 = State1#state { selected_pos = Pos,
+	    State2 = State1#state { selected_tab = Tab,
+				    selected_pos = Pos,
 				    selected_eff = EFF,
 				    selected_sff = SFF
 				  },
-	    highlight_row(Pos),
-	    show_pos(Pos,State2),
+	    highlight_row(Tab,Pos),
+	    show_pos(Tab,Pos,State2),
 	    State3 = refresh_node_state(Node, State2),
 	    ?dbg("select row=~w, eff=~8.16.0B, sff=~3.16.0B id=~s\n",
 		 [Pos, EFF, SFF, _SID]),
 	    send_pdo1_tx(0, ?MSG_REFRESH, 0, 0),
 	    {noreply, State3}
     end;
+%% handle select in uart list
+handle_info({select,"uarts.r"++RTxt,[{press,1},{x,_X},{y,_Y}|_]},State) ->
+    Pos = list_to_integer(RTxt),
+    State1 = deselect_row(State#state.selected_tab,
+			  State#state.selected_pos,State),
+    ?dbg("deselect row=~w\n", [State#state.selected_pos]),
+    Tab = "uarts",
+    case selected_id(Tab,Pos,State1) of
+	undefined ->
+	    {noreply, State1};
+	"lpc" ->
+	    highlight_row(Tab,Pos),
+	    State2 = State1#state { selected_tab = Tab,
+				    selected_pos = Pos,
+				    selected_eff = undefined,
+				    selected_sff =  undefined
+				    },
+	    show_pos(Tab,Pos,State2),
+	    {noreply, State2};
+	_ ->
+	    {noreply, State1}
+    end;
+
 handle_info({select,_ID,[{press,0},{x,_},{y,_}|_]},State) ->
     %% ignore mouse release in node selection
     {noreply, State};
@@ -351,7 +374,9 @@ handle_info({switch,ID,[{value,Value}]},State) ->
 
 %% send a reset and set hold mode
 handle_info({button,[_,_,_|".hold"],[{value,1}]},State) ->
-    case find_node_by_pos(State#state.selected_pos,State#state.nodes) of
+    case find_node_by_pos(State#state.selected_tab,
+			  State#state.selected_pos,
+			  State#state.nodes) of
 	false ->
 	    {noreply,State};
 	Node ->
@@ -372,8 +397,10 @@ handle_info({button,[_,_,_|".go"],[{value,1}]},State) ->
 %% show progress remove flash dialog and enable input
 %%
 handle_info({button,[_,_,_|".upgrade"],[{value,1}]},State) ->
-    case find_node_by_pos(State#state.selected_pos,State#state.nodes) of
-	undefined -> 
+    case find_node_by_pos(State#state.selected_tab,
+			  State#state.selected_pos,
+			  State#state.nodes) of
+	false -> 
 	    {noreply,State};
 	Node ->
 	    case match_uapp_firmware(Node, State) of
@@ -388,8 +415,10 @@ handle_info({button,[_,_,_|".upgrade"],[{value,1}]},State) ->
 %% reset the node
 handle_info({button,[_,_,_|".reset"],[{value,1}]},State) ->
     %% send a reset and set hold mode
-    case find_node_by_pos(State#state.selected_pos,State#state.nodes) of
-	undefined ->
+    case find_node_by_pos(State#state.selected_tab,
+			  State#state.selected_pos,
+			  State#state.nodes) of
+	false ->
 	    {noreply,State};
 	Node ->
 	    Serial = maps:get(serial,Node,0),
@@ -398,8 +427,10 @@ handle_info({button,[_,_,_|".reset"],[{value,1}]},State) ->
     end;
 
 handle_info({button,[_,_,_|".setup"],[{value,1}]},State) ->
-    case find_node_by_pos(State#state.selected_pos,State#state.nodes) of
-	undefined ->
+    case find_node_by_pos(State#state.selected_tab,
+			  State#state.selected_pos,
+			  State#state.nodes) of
+	false ->
 	    {noreply,State};
 	Node ->
 	    Status = maps:get(status,Node,undefined),
@@ -430,6 +461,7 @@ handle_info({button,[_,_,_|".restore"],[{value,1}]},State) ->
 handle_info({button,[_,_,_|".lpc_scan"],[{value,1}]},State) ->
     if State#state.uart =:= undefined, 
        is_list(State#state.elpc) ->
+	    %% fixme open using correct device if multiple!
 	    Elpc = State#state.elpc,
 	    ElpcDevice = proplists:get_value(device,Elpc),
 	    ElpcBaud   = proplists:get_value(baud,Elpc,38400),
@@ -444,11 +476,16 @@ handle_info({button,[_,_,_|".lpc_scan"],[{value,1}]},State) ->
 		{ok,U} ->
 		    case elpcisp:sync(U, 3) of
 			{ok,_} ->
+			    DevType = case elpcisp:read_device_type(U) of
+					  {ok,DT} -> DT;
+					  _ -> undefined
+				      end,
 			    Info = elpcisp:info(U),
 			    set_elpc_info(Info),
 			    set_elpc_status(idle),
 			    {noreply, State#state { uart = U,
-						    elpc_info = Info }};
+						    dev_info = Info,
+						    dev_type = DevType }};
 			_Error ->
 			    set_elpc_status(error),
 			    set_elpc_info([]),
@@ -460,15 +497,58 @@ handle_info({button,[_,_,_|".lpc_scan"],[{value,1}]},State) ->
 		    {noreply, State}
 	    end;
        is_port(State#state.uart) ->
+	    DevType = case elpcisp:read_device_type(State#state.uart) of
+			  {ok,DT} -> DT;
+			  _ -> undefined
+		      end,
 	    Info = elpcisp:info(State#state.uart),
 	    set_elpc_info(Info),
-	    {noreply, State#state { elpc_info = Info }};
+	    {noreply, State#state { dev_info = Info, dev_type = DevType }};
        true ->
-	    Info = fake_info(),
-	    set_elpc_info(Info),
-	    {noreply, State#state { elpc_info = Info }}
+	    set_elpc_info([]),
+	    {noreply, State#state { dev_info = [], dev_type = undefined }}
     end;
 
+handle_info({button,[_,_,_|".lpc_flash"],[{value,1}]},State) ->
+    case lists:keyfind(ihex,1,State#state.firmware) of
+	{ihex,Firmware} when State#state.uart =/= undefined ->
+	    case elpcisp:unlock(State#state.uart) of
+		{ok,_} ->
+		    case flash_firmware(State#state.uart, Firmware, 
+					State#state.dev_type) of
+			ok ->
+			    set_elpc_status(ok);
+			_Error ->
+			    set_elpc_status(error)
+		    end;
+		_Error ->
+		    set_elpc_status(error)
+	    end,
+	    {noreply, State};
+	_ ->
+	    {noreply, State}
+    end;
+
+handle_info({button,[_,_,_|".lpc_go"],[{value,1}]},State) ->
+    if State#state.uart =:= undefined ->
+	    {noreply, State};
+       true ->
+	    case elpcisp:go(State#state.uart, 0) of
+		{ok,_} -> set_elpc_status(idle);
+		_Error -> set_elpc_status(error)
+	    end,
+	    {noreply, State}
+    end;
+handle_info({button,[_,_,_|".lpc_reset"],[{value,1}]},State) ->
+    if State#state.uart =:= undefined ->
+	    {noreply, State};
+       true ->
+	    case elpcisp:reset(State#state.uart) of
+		{ok,_} -> set_elpc_status(idle);
+		_Error -> set_elpc_status(error)
+	    end,
+	    {noreply, State}
+    end;
 handle_info({button,_ID,[{value,0}]},State) ->
     %% ignore button release
     {noreply,State};
@@ -533,33 +613,31 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-fake_info() ->
-    case lists:keyfind("2129", #device_type.product, elpcisp:lpc_types()) of
-	false -> 
-	    [];
-	D ->
-	    [{version,{1,65}},
-	     {product,D#device_type.product},
-	     {flashSize,D#device_type.flashSize},
-	     {ramSize,D#device_type.ramSize},
-	     {flashSectors,D#device_type.flashSectors},
-	     {maxCopySize,D#device_type.maxCopySize},
-	     {variant,D#device_type.variant}]
-    end.
-
 set_elpc_row(undefined) ->
-    ok;
+    [];
 set_elpc_row(Elpc) ->
     ElpcDevice = proplists:get_value(device,Elpc),
+    ElpcBaud   = proplists:get_value(baud,Elpc,38400),
+    ElpcControl = proplists:get_value(control,Elpc,false),
+    ElpcControlSwap = proplists:get_value(control_swap,Elpc,false),
+    ElpcControlInv = proplists:get_value(control_inv,Elpc,false),
+    %%
     {Manuf0,Prod0,Serial0} = get_name_info(ElpcDevice),
-    Manuf = trunc_text(Manuf0,4),
-    Prod  = trunc_text(Prod0,12),
+    Manuf = trunc_text(Manuf0,12),
+    _Prod  = trunc_text(Prod0,12),
     Serial = trunc_text(Serial0,8),
-    set_text(serial,?NUM_TABLE_NODES+1,Serial),
-    set_text(id,?NUM_TABLE_NODES+1,Manuf),
-    set_text(product,?NUM_TABLE_NODES+1,Prod),
-    set_text(vsn,?NUM_TABLE_NODES+1,"1.0"),
-    set_elpc_status(idle).
+    set_uart_text(device,1,Manuf++" "++Serial),
+    set_uart_text(baud,1,ElpcBaud),
+    set_uart_text(control,1,uint1(ElpcControl)),
+    set_uart_text(swap,1,uint1(ElpcControlSwap)),
+    set_uart_text(invert,1,uint1(ElpcControlInv)),
+    set_elpc_status(idle),
+    [ #{ pos => 1, device => ElpcDevice, baud => ElpcBaud,
+	 control => ElpcControl, control_swap => ElpcControlSwap,
+	 control_inv => ElpcControlInv, status => scan } ].
+
+uint1(true) -> 1;
+uint1(false) -> 0.
 
 trunc_text(Text,MaxLen) ->
     string:substr(Text, 1, MaxLen).
@@ -588,7 +666,7 @@ get_name_info("/dev/"++Name) ->
 
 
 set_elpc_status(Status) ->
-    set_text(status,?NUM_TABLE_NODES+1,Status).
+    set_uart_text(status,1,Status).
 
 set_elpc_info(Info) ->
     Vsn = proplists:get_value(version, Info),
@@ -614,7 +692,9 @@ set_elpc_info(Info) ->
 %%  setup state=up
 %%
 refresh_node_state(State) ->
-    case find_node_by_pos(State#state.selected_pos,State#state.nodes) of
+    case find_node_by_pos(State#state.selected_tab,
+			  State#state.selected_pos,
+			  State#state.nodes) of
 	false -> State;
 	Node -> refresh_node_state(Node,State)
     end.
@@ -702,7 +782,9 @@ match_uapp_vsn(_AppVersion, []) ->
     false.
     
 action_sdo(State, Status, Index, Si, Value) ->
-    case find_node_by_pos(State#state.selected_pos,State#state.nodes) of
+    case find_node_by_pos(State#state.selected_tab,
+			  State#state.selected_pos,
+			  State#state.nodes) of
 	false ->
 	    State;
 	Node ->
@@ -731,16 +813,18 @@ action_sdo(State, Status, Index, Si, Value) ->
 %% powerZone test setup
 %% set output-type:1-8 dimmer
 %% set output-max-step:1-8 255
-%% set output-flags:1-8 anload,outact
+%% set output-flags:1-8 anload,outact,value
 %% set input-flags:32 active
 %% set input-out:32 1..8
 %%
 
 powerZone_setup(Nid,State) ->
+    OutputFlags = ?OUTPUT_FLAG_ANLOAD bor 
+	          ?OUTPUT_FLAG_OUTACT bor
+	          ?OUTPUT_FLAG_VALUE,
     co_sdo_cli:set_batch([{Nid,?INDEX_OUTPUT_TYPE,{1,8},?TYPE_DIMMER},
 			  {Nid,?INDEX_OUTPUT_STEPMAX,{1,8},255},
-			  {Nid,?INDEX_OUTPUT_FLAGS,{1,8},
-			   ?OUTPUT_FLAG_ANLOAD bor ?OUTPUT_FLAG_OUTACT},
+			  {Nid,?INDEX_OUTPUT_FLAGS,{1,8}, OutputFlags},
 			  {Nid,?INDEX_INPUT_FLAGS,32,?INPUT_ACTIVE},
 			  {Nid,?INDEX_INPUT_OUT,32,16#ff}
 			 ],1000),
@@ -751,16 +835,17 @@ powerZone_setup(Nid,State) ->
 %% set output-type:1-6 dimmer
 %% set output-max-step:1-6 255
 %% set output-type:7-10 onoff
-%% set output-flags:1-10 outact
+%% set output-flags:1-10 outact,value
 %% set input-flags:32 active
 %% set input-out:32 1..10
 %%
 bridgeZone_setup(Nid, State) ->
+    OutputFlags = ?OUTPUT_FLAG_OUTACT bor
+	          ?OUTPUT_FLAG_VALUE,
     co_sdo_cli:set_batch([{Nid,?INDEX_OUTPUT_TYPE,{1,6},?TYPE_DIMMER},
 			  {Nid,?INDEX_OUTPUT_TYPE,{7,10},?TYPE_ONOFF},
 			  {Nid,?INDEX_OUTPUT_STEPMAX,{1,6},255},
-			  {Nid,?INDEX_OUTPUT_FLAGS,{1,10},
-			   ?OUTPUT_FLAG_OUTACT},
+			  {Nid,?INDEX_OUTPUT_FLAGS,{1,10},OutputFlags},
 			  {Nid,?INDEX_INPUT_FLAGS,32,?INPUT_ACTIVE},
 			  {Nid,?INDEX_INPUT_OUT,32,16#3ff}
 			 ],1000),
@@ -769,19 +854,19 @@ bridgeZone_setup(Nid, State) ->
 %%
 %% ioZone test setup
 %% set output-type:1-8 onoff
-%% set output-flags:1-8 outact
+%% set output-flags:1-8 outact,value
 %% set input-flags:32 active
 %% set input-out:32 1..8
 %%
 ioZone_setup(Nid,State) ->
+    OutputFlags = ?OUTPUT_FLAG_OUTACT bor
+	          ?OUTPUT_FLAG_VALUE,
     co_sdo_cli:set_batch([{Nid,?INDEX_OUTPUT_TYPE,{1,8},?TYPE_ONOFF},
-			  {Nid,?INDEX_OUTPUT_FLAGS,{1,8},
-			   ?OUTPUT_FLAG_OUTACT},
+			  {Nid,?INDEX_OUTPUT_FLAGS,{1,8},OutputFlags},
 			  {Nid,?INDEX_INPUT_FLAGS,32,?INPUT_ACTIVE},
 			  {Nid,?INDEX_INPUT_OUT,32,16#ff}
 			 ],1000),
     {noreply,State}.
-
 
 %%
 %% controlZone test setup
@@ -797,23 +882,23 @@ event(Signal,ID,Env) ->
     ?dbg("Got event callback ~p\n", [{Signal,ID,Env}]),
     ?SERVER ! {Signal,ID,Env}.
 
-deselect_row(undefined, State) ->
-    State;
-deselect_row(Pos, State) ->
-    case selected_id(Pos,State) of
+deselect_row(undefined,_Pos, State) -> State;
+deselect_row(_Tab,undefined, State) -> State;
+deselect_row(Tab,Pos,State) ->
+    case selected_id(Tab,Pos,State) of
 	undefined ->
 	    ok;
 	SID ->
-	    RowID = "nodes.r"++integer_to_list(Pos),
+	    RowID = Tab++".r"++integer_to_list(Pos),
 	    io:format("HIDE (row) id=~p\n", [SID]),
 	    epxy:set(SID,[{hidden,all},{disabled,all}]),
 	    epxy:set(RowID,[{hidden,true}])
     end,
-    State#state { selected_pos=undefined }.
+    State#state { selected_tab=undefined, selected_pos=undefined }.
 
 %% show the row 
-highlight_row(Row) ->
-    RowID = "nodes.r"++integer_to_list(Row),
+highlight_row(Table,Row) ->
+    RowID = Table++".r"++integer_to_list(Row),
     epxy:set(RowID,[{hidden,false}]).
 
 hide_if_selected(Serial,State) ->
@@ -825,9 +910,9 @@ hide_if_selected(Serial,State) ->
     end.
 
 hide(State) ->
-    hide_pos(State#state.selected_pos, State).
-hide_pos(Pos, State) ->
-    case selected_id(Pos,State) of
+    hide_pos(State#state.selected_tab,State#state.selected_pos, State).
+hide_pos(Tab,Pos,State) ->
+    case selected_id(Tab,Pos,State) of
 	undefined ->
 	    ok;
 	SID ->
@@ -844,9 +929,9 @@ show_if_selected(Serial,State) ->
     end.
 
 show(State) ->
-    show_pos(State#state.selected_pos, State).
-show_pos(Pos, State) ->
-    case selected_id(Pos,State) of
+    show_pos(State#state.selected_tab,State#state.selected_pos, State).
+show_pos(Tab,Pos, State) ->
+    case selected_id(Tab,Pos,State) of
 	undefined ->
 	    ok;
 	SID ->
@@ -867,27 +952,21 @@ show_pos(Pos, State) ->
 %% +------+---+----------+---+--------+
 %%
 
-node_table(W,_H) ->
+node_table(X,Y,W,_H) ->
     {TxW,TxH} = text_cell_dimension(),
-    XOffs = 8,
-    YOffs = 8,
-    NRows = ?NUM_TABLE_NODES+1,
+    NRows = ?NUM_TABLE_NODES,
     ID = "nodes",
-    TabX = table_header(ID,TxW,TxH,W),
-    TabWidth = TabX - XOffs,
+    TabX = node_table_header(ID,TxW,TxH,W),
+    TabWidth = TabX - X,
     %% create parent after header, order only important at the time of draw
-    table(ID,XOffs,YOffs,TabWidth,NRows*TxH),
-    [table_row(ID,I,TxW,TxH,W) || I <- lists:seq(1,NRows)],
-
-    LPC = #{ pos => ?NUM_TABLE_NODES+1,
-	     serial => "USB1",
-	     product => lpc,
-	     vsn     => {0,0},
-	     status  => scan },
-    {XOffs,YOffs,TxH,LPC}.
+    table(ID,X,Y,TabWidth,NRows*TxH),
+    Xs = [table_row(ID,I,TxW,TxH,W)|| I <- lists:seq(1,NRows)],
+    X1 = lists:max(Xs),
+    Y1 = NRows*TxH + TxH,
+    {X1,Y1,TxH}.
 
 %% install table header return next X location
-table_header(Parent,TxW,TxH,_W) ->
+node_table_header(Parent,TxW,TxH,_W) ->
     ID = Parent++".h", %%
     X = 0,
     Y = 0,
@@ -950,6 +1029,104 @@ table_row(Parent,I,TxW,TxH,_W) ->
 	      [{text,""},{halign,center}]),
 
     X4 + W4 + 1.
+
+%% Uart table
+%% +--------------+------+-+-+-+------+
+%% |Device        | Baud |C|S|I|Satus |
+%% +------+---+----------+-+-+-+------+
+%% |/dev/ttyUSB1  |38400 |1|0|0| Scan |
+%% +------+---+----------+-+-+-+------+
+%%
+
+uart_table(X,Y,W,_H) ->
+    {TxW,TxH} = text_cell_dimension(),
+    NRows = ?NUM_TABLE_UARTS,
+    ID = "uarts",
+    TabX = uart_table_header(ID,TxW,TxH,W),
+    TabWidth = TabX - X,
+    %% create parent after header, order only important at the time of draw
+    table(ID,X,Y,TabWidth,NRows*TxH),
+    Xs = [uart_table_row(ID,I,TxW,TxH,W) || I <- lists:seq(1,NRows)],
+    X1 = lists:max(Xs),
+    Y1 = NRows*TxH + TxH,
+    {X1,Y1,TxH}.
+
+%% install table header return next X location
+%% Device (short) baud control swap inv
+uart_table_header(Parent,TxW,TxH,_W) ->
+    ID = Parent++".h", %%
+    X = 0,
+    Y = 0,
+    H = TxH,
+    Opts = [{font_color,white},{color,black},{fill,solid}],
+
+    row(ID,X,Y,(6+3+10+3+5)*TxW+(1+1+1+1+1),H,true),
+
+    X0 = 0,
+    W0 = 12*TxW,
+    text_cell(ID++".device", X0, Y, W0, H,
+	      [{text,"Device"},{halign,center}|Opts]),
+    X1 = X0 + W0 + 1,
+    W1 = 6*TxW,
+    text_cell(ID++".baud", X1, Y, W1, H, 
+	      [{text,"Baud"},{halign,center}|Opts]),
+    X2 = X1 + W1 + 1,
+    W2 = 1*TxW,
+    text_cell(ID++".control", X2, Y, W2, H,
+	      [{text,"C"},{halign,center}|Opts]),
+    X3 = X2 + W2 + 1,
+    W3 = 1*TxW,
+    text_cell(ID++".swap", X3, Y, W3, H,
+	      [{text,"W"},{halign,center}|Opts]),
+    X4 = X3 + W3 + 1,
+    W4 = 1*TxW,
+    text_cell(ID++".invert", X4, Y, W4, H,
+	      [{text,"I"},{halign,center}|Opts]),
+
+    X5 = X4 + W4 + 1,
+    W5 = 6*TxW,
+    text_cell(ID++".status", X5, Y, W5, H,
+	      [{text,"Status"},{halign,center}|Opts]),
+    X5 + W5 + 1.
+
+%% install table row return next X location
+uart_table_row(Parent,I,TxW,TxH,_W) ->
+    ID = Parent++[$.,$r|integer_to_list(I)], %% <id>.r<i>
+    X = 0, Y = I*TxH, H = TxH,
+
+    %% parent to table cells
+    row(ID,X,Y,(6+3+10+3+5)*TxW+(1+1+1+1+1),H,false),
+    epxy:add_callback(ID,select,?MODULE),
+    
+    %% and now the cells, smaller font for device (to make it fit)
+    DeviceFont = [{name,"Arial"},{slant,roman},{weight,bold},{size,12}],
+    X0 = 0,
+    W0 = 12*TxW,
+    text_cell(ID++".device", X0, 0, W0, H,
+	      [{text,""},{halign,center},{font,DeviceFont}]),
+    X1 = X0 + W0 + 1,
+    W1 = 6*TxW,
+    text_cell(ID++".baud", X1, 0, W1, H,
+	      [{text,""},{halign,center}]),
+    X2 = X1 + W1 + 1,
+    W2 = 1*TxW,
+    text_cell(ID++".control", X2, 0, W2, H,
+	      [{text,""},{halign,center}]),
+    X3 = X2 + W2 + 1,
+    W3 = 1*TxW,
+    text_cell(ID++".swap", X3, 0, W3, H,
+	      [{text,""},{halign,center}]),
+    X4 = X3 + W3 + 1,
+    W4 = 1*TxW,
+    text_cell(ID++".invert", X4, 0, W4, H,
+	      [{text,""},{halign,center}]),
+    X5 = X4 + W4 + 1,
+    W5 = 6*TxW,
+    text_cell(ID++".status", X5, 0, W5, H,
+	      [{text,""},{halign,center}]),
+    X5 + W5 + 1.
+
+
 
 %% parent to all rows
 table(ID, X, Y, W, H) ->
@@ -1895,6 +2072,37 @@ node_data(Index, Si, Value, State) ->
 		    undefined
 	    end;
 
+	?MSG_OUTPUT_VALUE ->
+	    SID = selected_id(State),
+	    ?dbg("MSG_OUTPUT_VALUE: [~s], si=~w, value=~w\n", 
+		 [SID,Si,Value]),
+	    case SID of
+		"pdb" ->
+		    case Si of
+			1 -> set_value("pdb.pout.e1", Value);
+			2 -> set_value("pdb.pout.e2", Value);
+			3 -> set_value("pdb.pout.e3", Value);
+			4 -> set_value("pdb.pout.e4", Value);
+			5 -> set_value("pdb.aout.e5", Value);
+			6 -> set_value("pdb.aout.e6", Value);
+			_ -> ok
+		    end;
+		"pds" ->
+		    case Si of
+			1 -> set_value("pds.pout.e1", Value);
+			2 -> set_value("pds.pout.e2", Value);
+			3 -> set_value("pds.pout.e3", Value);
+			4 -> set_value("pds.pout.e4", Value);
+			5 -> set_value("pds.pout.e5", Value);
+			6 -> set_value("pds.pout.e6", Value);
+			7 -> set_value("pds.pout.e7", Value);
+			8 -> set_value("pds.pout.e8", Value);
+			_ -> ok
+		    end;
+		_ ->
+		    ok
+	    end;
+
 	?MSG_OUTPUT_STATE ->
 	    _OnOff = (Value bsr 24) band 16#ff,
 	    _OutSt = (Value bsr 16) band 16#ff,
@@ -1924,20 +2132,25 @@ is_selected_by_serial(Serial, State) ->
 selected_status(State) ->
     selected_status(State#state.selected_pos,State).
 selected_status(Pos,State) ->
-    case find_node_by_pos(Pos,State#state.nodes) of
+    case find_node_by_pos(State#state.selected_tab,Pos,State#state.nodes) of
 	false -> undefined;
 	Node -> maps:get(status,Node,undefined)
     end.
 
 selected_id(State) ->
-    selected_id(State#state.selected_pos,State).
-selected_id(Pos,State) ->
-    case find_node_by_pos(Pos,State#state.nodes) of
+    selected_id(State#state.selected_tab,State#state.selected_pos,State).
+
+selected_id("uarts",Pos,State) ->
+    case find_by_pos(Pos,State#state.uarts) of
+	false -> undefined;
+	Uart -> "lpc"
+    end;
+selected_id("nodes",Pos,State) ->
+    case find_by_pos(Pos,State#state.nodes) of
 	false -> undefined;
 	Node ->
 	    case maps:get(status,Node,undefined) of
 		undefined -> undefined;
-		scan -> "lpc";
 		up ->
 		    case maps:get(product,Node,undefined) of
 			undefined -> undefined;
@@ -1950,7 +2163,10 @@ selected_id(Pos,State) ->
 		boot  -> "ubt";
 		flash -> "ubt"
 	    end
-    end.
+    end;
+selected_id(undefined,_Pos,_State) ->
+    undefined.
+
 
 switch_state(ID,0) ->
     epxy:set(ID,[{color,lightgray},{text,"OFF"}]);
@@ -2074,9 +2290,19 @@ set_text(Key,Pos,Value) ->
 	    ok
     end.
 
+set_uart_text(Key,Pos,Value) ->
+    case is_uart_item(Key) of
+	true ->
+	    ID = "uarts.r"++integer_to_list(Pos)++"."++atom_to_list(Key),
+	    ?dbg("set_uart_text: id=~s, value=~p\n", [ID,Value]),
+	    epxy:set(ID,[{text,format_value(Key,Value)}]);
+	false ->
+	    ok
+    end.
+
 format_value(serial,Value) when is_integer(Value) ->
     tl(integer_to_list(16#1000000+Value, 16));
-format_value(serial,Value) when is_list(Value) ->
+format_value(device,Value) when is_list(Value) ->
     Value;
 format_value(vsn,{Major,Minor}) ->
     integer_to_list(Major)++"."++integer_to_list(Minor);
@@ -2105,6 +2331,14 @@ is_node_item(vsn) -> true;
 is_node_item(status) -> true;
 is_node_item(_) -> false.
 
+is_uart_item(device) -> true;
+is_uart_item(baud) -> true;
+is_uart_item(control) -> true;
+is_uart_item(swap) -> true;
+is_uart_item(invert) -> true;
+is_uart_item(status) -> true;
+is_uart_item(_) -> false.
+
 %% find node with Serial
 take_node_by_serial(Serial, Ns) ->
     take_node_by_serial(Serial, Ns, []).
@@ -2127,18 +2361,23 @@ take_node_by_id(Id, [Node|Ns], Ms) ->
 take_node_by_id(_Id, [], _Ms) ->
     false.
 
-find_node_by_pos(Pos, Ns) ->  find_node_by_key(pos, Pos, Ns).
-find_node_by_serial(Serial, Ns) -> find_node_by_key(serial, Serial, Ns).
+find_by_pos(Pos, Maps) ->  
+    find_by_key(pos, Pos, Maps).
+
+find_node_by_pos("nodes",Pos, Ns) ->  find_by_key(pos, Pos, Ns);
+find_node_by_pos(_Tab,_Pos,_Ns) -> false.
+
+find_node_by_serial(Serial, Ns) -> find_by_key(serial, Serial, Ns).
 
 %% find node with key and Value
-find_node_by_key(Key,Value,[Node|Ns]) ->
-    case Node of
+find_by_key(Key,Value,[M|Ms]) ->
+    case M of
 	#{ Key := Value} ->
-	    Node;
+	    M;
 	_ ->
-	    find_node_by_key(Key,Value,Ns)
+	    find_by_key(Key,Value,Ms)
     end;
-find_node_by_key(_Key, _Value, []) ->
+find_by_key(_Key, _Value, []) ->
     false.
 
 load_firmware() ->
@@ -2207,3 +2446,21 @@ flash_node(Node,_Version,Bs,State) ->
       end),
     State1.
 
+flash_firmware(U, Firmware, DevType) ->
+    BlockList = elpcisp:block_list(Firmware, DevType),
+    flash_block_list(U, DevType, BlockList).
+
+flash_block_list(U, DevType, [{Start,StartBlock,EndBlock,Data}|Bs]) ->
+    {ok,_} = elpcisp:prepare_sector(U, StartBlock, EndBlock),
+    {ok,_} = elpcisp:erase_sector(U, StartBlock, EndBlock),
+    Pos = 1,  %% fixme multiple uarts
+    End = Start + byte_size(Data),
+    ID = "uarts.r"++integer_to_list(Pos),
+    elpcisp:flash_block(U, DevType, Start, Data,
+			fun(A) ->
+				V = (A-Start)/(End-Start),
+				epxy:set(ID,[{value,V}])
+			end),
+    flash_block_list(U, DevType, Bs);
+flash_block_list(_U, _DevType, []) ->
+    ok.
