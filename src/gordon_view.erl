@@ -110,6 +110,8 @@ start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
 start() ->
+    (catch error_logger:tty(false)),
+    application:start(lager),
     application:load(gordon),
     application:load(can),
     application:set_env(can, wakeup, true),
@@ -121,6 +123,8 @@ start() ->
 
 %% start rpi with touch screen
 start_rpi() ->
+    (catch error_logger:tty(false)),
+    application:start(lager),
     ok = application:load(epx),
     application:set_env(epx, backend, "fb"),
     application:set_env(epx, pixel_format, 'argb/little'),
