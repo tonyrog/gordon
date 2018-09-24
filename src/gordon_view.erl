@@ -59,8 +59,9 @@
 -define(DOUT_FONT_SIZE, 14).
 -define(AIN_FONT_SIZE, 14).
 -define(ALOAD_FONT_SIZE, 14).
--define(BUTTON_FONT_SIZE, 16).
--define(ONOFF_FONT_SIZE, 14).
+-define(BUTTON_FONT_SIZE, 18).
+-define(LABEL_FONT_SIZE, 14).
+-define(ONOFF_FONT_SIZE, 18).
 -define(ONOFF_ROUND_WH, 4).
 -define(GROUP_FONT_SIZE, 12).
 -define(SLIDER_WIDTH,  100).
@@ -69,6 +70,14 @@
 -define(BUTTON_WIDTH, 72).
 -define(BUTTON_HEIGHT, 18).
 -define(BUTTON_ROUND_WH, 4).
+-define(TOP_XGAP, 12).
+-define(TOP_YGAP, 12).
+-define(GROUP_XGAP, 8).
+-define(GROUP_YGAP, 12).
+-define(BUTTON_XGAP, 8).
+-define(BUTTON_YGAP, 12).
+
+
 
 -define(NUM_TABLE_NODES, 14).
 -define(NUM_TABLE_UARTS, 2).
@@ -955,6 +964,11 @@ show_pos(Tab,Pos, State) ->
 %% |USB1  |   |          |   |  scan  |
 %% +------+---+----------+---+--------+
 %%
+-define(CELL_NODE_SERIAL, 5).
+-define(CELL_NODE_ID,     3).
+-define(CELL_NODE_PROD,   9).
+-define(CELL_NODE_VSN,    3).
+-define(CELL_NODE_STATUS, 4).
 
 node_table(X,Y,W,_H) ->
     {TxW,TxH} = text_cell_dimension(),
@@ -977,26 +991,29 @@ node_table_header(Parent,TxW,TxH,_W) ->
     H = TxH,
     Opts = [{font_color,white},{color,black},{fill,solid}],
 
-    row(ID,X,Y,(6+3+10+3+5)*TxW+(1+1+1+1+1),H,true),
+    CellSum = ?CELL_NODE_SERIAL+?CELL_NODE_ID+
+	?CELL_NODE_PROD+?CELL_NODE_VSN+
+	?CELL_NODE_STATUS,
+    row(ID,X,Y,CellSum*TxW+(1+1+1+1+1),H,true),
 
     X0 = 0,
-    W0 = 6*TxW,
+    W0 = ?CELL_NODE_SERIAL*TxW,
     text_cell(ID++".serial", X0, Y, W0, H,
 	      [{text,"Serial"},{halign,right}|Opts]),
     X1 = X0 + W0 + 1,
-    W1 = 3*TxW,
+    W1 = ?CELL_NODE_ID*TxW,
     text_cell(ID++".id", X1, Y, W1, H, 
 	      [{text,"ID"},{halign,right}|Opts]),
     X2 = X1 + W1 + 1,
-    W2 = 10*TxW,
+    W2 = ?CELL_NODE_PROD*TxW,
     text_cell(ID++".product", X2, Y, W2, H,
 	      [{text,"Product"},{halign,center}|Opts]),
     X3 = X2 + W2 + 1,
-    W3 = 3*TxW,
+    W3 = ?CELL_NODE_VSN*TxW,
     text_cell(ID++".vsn", X3, Y, W3, H,
 	      [{text,"Vsn"},{halign,center}|Opts]),
     X4 = X3 + W3 + 1,
-    W4 = 5*TxW,
+    W4 = ?CELL_NODE_STATUS*TxW,
     text_cell(ID++".status", X4, Y, W4, H,
 	      [{text,"Status"},{halign,center}|Opts]),
     X4 + W4 + 1.
@@ -1007,28 +1024,31 @@ table_row(Parent,I,TxW,TxH,_W) ->
     X = 0, Y = I*TxH, H = TxH,
 
     %% parent to table cells
-    row(ID,X,Y,(6+3+10+3+5)*TxW+(1+1+1+1+1),H,false),
+    CellSum = ?CELL_NODE_SERIAL+?CELL_NODE_ID+
+	?CELL_NODE_PROD+?CELL_NODE_VSN+
+	?CELL_NODE_STATUS,
+    row(ID,X,Y,CellSum*TxW+(1+1+1+1+1),H,false),
     epxy:add_callback(ID,select,?MODULE),
     
     %% and now the cells
     X0 = 0,
-    W0 = 6*TxW,
+    W0 = ?CELL_NODE_SERIAL*TxW,
     text_cell(ID++".serial", X0, 0, W0, H,
 	      [{text,""},{halign,right}]),
     X1 = X0 + W0 + 1,
-    W1 = 3*TxW,
+    W1 = ?CELL_NODE_ID*TxW,
     text_cell(ID++".id", X1, 0, W1, H,
 	      [{text,""},{halign,right}]),
     X2 = X1 + W1 + 1,
-    W2 = 10*TxW,
+    W2 = ?CELL_NODE_PROD*TxW,
     text_cell(ID++".product", X2, 0, W2, H,
 	      [{text,""},{halign,center}]),
     X3 = X2 + W2 + 1,
-    W3 = 3*TxW,
+    W3 = ?CELL_NODE_VSN*TxW,
     text_cell(ID++".vsn", X3, 0, W3, H,
 	      [{text,""},{halign,center}]),
     X4 = X3 + W3 + 1,
-    W4 = 5*TxW,
+    W4 = ?CELL_NODE_STATUS*TxW,
     text_cell(ID++".status", X4, 0, W4, H,
 	      [{text,""},{halign,center}]),
 
@@ -1041,6 +1061,13 @@ table_row(Parent,I,TxW,TxH,_W) ->
 %% |/dev/ttyUSB1  |38400 |1|0|0| Scan |
 %% +------+---+----------+-+-+-+------+
 %%
+-define(CELL_UART_DEV,    12).
+-define(CELL_UART_BAUD,    5).
+-define(CELL_UART_CONTROL, 1).
+-define(CELL_UART_SWAP,    1).
+-define(CELL_UART_INVERT,  1).
+-define(CELL_UART_STATUS,  4).
+
 
 uart_table(X,Y,W,_H) ->
     {TxW,TxH} = text_cell_dimension(),
@@ -1064,31 +1091,33 @@ uart_table_header(Parent,TxW,TxH,_W) ->
     H = TxH,
     Opts = [{font_color,white},{color,black},{fill,solid}],
 
-    row(ID,X,Y,(6+3+10+3+5)*TxW+(1+1+1+1+1),H,true),
+    CellSum = ?CELL_UART_DEV+?CELL_UART_BAUD+?CELL_UART_CONTROL+
+	?CELL_UART_SWAP+?CELL_UART_INVERT+?CELL_UART_STATUS,
+    row(ID,X,Y,CellSum*TxW+(1+1+1+1+1),H,true),
 
     X0 = 0,
-    W0 = 12*TxW,
+    W0 = ?CELL_UART_DEV*TxW,
     text_cell(ID++".device", X0, Y, W0, H,
 	      [{text,"Device"},{halign,center}|Opts]),
     X1 = X0 + W0 + 1,
-    W1 = 6*TxW,
+    W1 = ?CELL_UART_BAUD*TxW,
     text_cell(ID++".baud", X1, Y, W1, H, 
 	      [{text,"Baud"},{halign,center}|Opts]),
     X2 = X1 + W1 + 1,
-    W2 = 1*TxW,
+    W2 = ?CELL_UART_CONTROL*TxW,
     text_cell(ID++".control", X2, Y, W2, H,
 	      [{text,"C"},{halign,center}|Opts]),
     X3 = X2 + W2 + 1,
-    W3 = 1*TxW,
+    W3 = ?CELL_UART_SWAP*TxW,
     text_cell(ID++".swap", X3, Y, W3, H,
 	      [{text,"W"},{halign,center}|Opts]),
     X4 = X3 + W3 + 1,
-    W4 = 1*TxW,
+    W4 = ?CELL_UART_INVERT*TxW,
     text_cell(ID++".invert", X4, Y, W4, H,
 	      [{text,"I"},{halign,center}|Opts]),
 
     X5 = X4 + W4 + 1,
-    W5 = 6*TxW,
+    W5 = ?CELL_UART_STATUS*TxW,
     text_cell(ID++".status", X5, Y, W5, H,
 	      [{text,"Status"},{halign,center}|Opts]),
     X5 + W5 + 1.
@@ -1099,33 +1128,35 @@ uart_table_row(Parent,I,TxW,TxH,_W) ->
     X = 0, Y = I*TxH, H = TxH,
 
     %% parent to table cells
-    row(ID,X,Y,(6+3+10+3+5)*TxW+(1+1+1+1+1),H,false),
+    CellSum = ?CELL_UART_DEV+?CELL_UART_BAUD+?CELL_UART_CONTROL+
+	?CELL_UART_SWAP+?CELL_UART_INVERT+?CELL_UART_STATUS,
+    row(ID,X,Y,CellSum*TxW+(1+1+1+1+1),H,false),
     epxy:add_callback(ID,select,?MODULE),
     
     %% and now the cells, smaller font for device (to make it fit)
     DeviceFont = [{name,"Arial"},{slant,roman},{weight,bold},{size,12}],
     X0 = 0,
-    W0 = 12*TxW,
+    W0 = ?CELL_UART_DEV*TxW,
     text_cell(ID++".device", X0, 0, W0, H,
 	      [{text,""},{halign,center},{font,DeviceFont}]),
     X1 = X0 + W0 + 1,
-    W1 = 6*TxW,
+    W1 = ?CELL_UART_BAUD*TxW,
     text_cell(ID++".baud", X1, 0, W1, H,
 	      [{text,""},{halign,center}]),
     X2 = X1 + W1 + 1,
-    W2 = 1*TxW,
+    W2 = ?CELL_UART_CONTROL*TxW,
     text_cell(ID++".control", X2, 0, W2, H,
 	      [{text,""},{halign,center}]),
     X3 = X2 + W2 + 1,
-    W3 = 1*TxW,
+    W3 = ?CELL_UART_SWAP*TxW,
     text_cell(ID++".swap", X3, 0, W3, H,
 	      [{text,""},{halign,center}]),
     X4 = X3 + W3 + 1,
-    W4 = 1*TxW,
+    W4 = ?CELL_UART_INVERT*TxW,
     text_cell(ID++".invert", X4, 0, W4, H,
 	      [{text,""},{halign,center}]),
     X5 = X4 + W4 + 1,
-    W5 = 6*TxW,
+    W5 = ?CELL_UART_STATUS*TxW,
     text_cell(ID++".status", X5, 0, W5, H,
 	      [{text,""},{halign,center}]),
     X5 + W5 + 1.
@@ -1176,7 +1207,7 @@ border(ID,W,H,_Opts) ->
 
 %% bridgeZone layout
 bridgeZone(X,Y,_W,_H) ->
-    XGap = 12,
+    XGap = ?TOP_XGAP,
     YGap = ?GROUP_FONT_SIZE,
     Y0 = YGap,
     X1 = XGap,
@@ -1210,7 +1241,7 @@ bridgeZone(X,Y,_W,_H) ->
     ok.
 
 ioZone(X,Y,_W,_H) ->
-    XGap = 12,
+    XGap = ?TOP_XGAP,
     YGap = ?GROUP_FONT_SIZE,
     Y0 = YGap,
     X1 = XGap,
@@ -1240,7 +1271,7 @@ ioZone(X,Y,_W,_H) ->
     ok.
 
 powerZone(X,Y,_W,_H) ->
-    XGap = 12,
+    XGap = ?TOP_XGAP,
     YGap = ?GROUP_FONT_SIZE,
     Y0 = YGap,
     X1 = XGap,
@@ -1279,7 +1310,7 @@ powerZone(X,Y,_W,_H) ->
 %%    Go  Upgrade Reset
 %%
 uBoot(X,Y,_W,_H) ->
-    XGap = 12,
+    XGap = ?TOP_XGAP,
     YGap = ?GROUP_FONT_SIZE,
     Y0 = YGap,
     X1 = XGap,
@@ -1306,7 +1337,7 @@ uBoot(X,Y,_W,_H) ->
 %% variant
 %%
 lpcBoot(X,Y,_W,_H) ->
-    XGap = 12,
+    XGap = ?TOP_XGAP,
     YGap = ?GROUP_FONT_SIZE,
     Y0 = YGap,
     X1 = XGap,
@@ -1332,8 +1363,8 @@ lpcBoot(X,Y,_W,_H) ->
 add_lpc_buttons(ID, X, Y, _W, _H) ->
     W = ?BUTTON_WIDTH,
     H = ?BUTTON_HEIGHT,
-    YGap = 10,
-    XGap = 8,
+    YGap = ?BUTTON_YGAP,
+    XGap = ?BUTTON_XGAP,
     X0 = X,
     X1 = X0 + W + XGap,
     X2 = X1 + W + XGap,
@@ -1349,8 +1380,8 @@ add_lpc_buttons(ID, X, Y, _W, _H) ->
 add_uboot_buttons(ID, X, Y) ->
     W = ?BUTTON_WIDTH,
     H = ?BUTTON_HEIGHT,
-    YGap = 10,
-    XGap = 8,
+    YGap = ?BUTTON_YGAP,
+    XGap = ?BUTTON_XGAP,
     X0 = X,
     X1 = X0 + W + XGap,
     X2 = X1 + W + XGap,
@@ -1364,8 +1395,8 @@ add_uboot_buttons(ID, X, Y) ->
 add_buttons(ID, X, Y) ->
     W = ?BUTTON_WIDTH,
     H = ?BUTTON_HEIGHT,
-    YGap = 10,
-    XGap = 8,
+    YGap = ?BUTTON_YGAP,
+    XGap = ?BUTTON_XGAP,
     X0 = X,
     X1 = X0 + W + XGap,
     X2 = X1 + W + XGap,
@@ -1403,7 +1434,7 @@ aout_group(ID, Chan0, Chan1, X0, Y0) ->
     Step = if Chan0 < Chan1 -> 1; true -> -1 end,
     XLeft  = 12, XRight = 12,
     YTop   = 12, YBot   = 12,
-    YGap   = 8,
+    YGap   = ?GROUP_YGAP,
     {Y2,W2} = lists:foldl(
 		fun(Chan, {Yi,Wi}) ->
 			Num = (Chan - min(Chan1,Chan0))+1,
@@ -1421,7 +1452,7 @@ pout_group(ID, Chan0, Chan1, X0, Y0) ->
     Step = if Chan0 < Chan1 -> 1; true -> -1 end,
     XLeft  = 12, XRight = 12,
     YTop   = 12, YBot  = 12,
-    YGap   = 8,
+    YGap   = ?GROUP_YGAP,
     {Y2,W2} = lists:foldl(
 		fun(Chan, {Yi,Wi}) ->
 			Num = (Chan - min(Chan1,Chan0))+1,
@@ -1438,7 +1469,7 @@ ain_group(ID, Chan0, Chan1, X0, Y0) ->
     Step = if Chan0 < Chan1 -> 1; true -> -1 end,
     XLeft  = 12, XRight = 12,
     YTop   = 12, YBot   = 12,
-    YGap   = 8,
+    YGap   = ?GROUP_YGAP,
     {Y2,W2} = lists:foldl(
 		fun(Chan, {Yi,Wi}) ->
 			Num = (Chan - min(Chan1,Chan0))+1,
@@ -1455,7 +1486,7 @@ aload_group(ID, Chan0, Chan1, X0, Y0) ->
     Step = if Chan0 < Chan1 -> 1; true -> -1 end,
     XLeft  = 12, XRight = 12,
     YTop   = 12, YBot   = 12,
-    YGap   = 8,
+    YGap   = ?GROUP_YGAP,
     {Y2,W2} = lists:foldl(
 		fun(Chan, {Yi,Wi}) ->
 			Num = (Chan - min(Chan1,Chan0))+1,
@@ -1472,7 +1503,7 @@ din_group(ID, Chan0, Chan1, X0, Y0) ->
     Step = if Chan0 < Chan1 -> 1; true -> -1 end,
     XLeft  = 12, XRight = 12,
     YTop   = 12, YBot   = 12,
-    YGap   = 8,
+    YGap   = ?GROUP_YGAP,
     {Y2,W2} = lists:foldl(
 		fun(Chan, {Yi,Wi}) ->
 			Num = (Chan - min(Chan1,Chan0))+1,
@@ -1489,7 +1520,7 @@ dout_group(ID, Chan0, Chan1, X0, Y0) ->
     Step = if Chan0 < Chan1 -> 1; true -> -1 end,
     XLeft  = 12,  XRight = 12,
     YTop   = 12, YBot  = 12,
-    YGap   = 8,
+    YGap   = ?GROUP_YGAP,
     {Y2,W2} = lists:foldl(
 		fun(Chan, {Yi,Wi}) ->
 			Num = (Chan - min(Chan1,Chan0))+1,
@@ -1505,34 +1536,13 @@ dout_group(ID, Chan0, Chan1, X0, Y0) ->
 
 dout(ID0,Chan,Num,X,Y) ->
     ID = ID0++[$.,$e|integer_to_list(Chan)],
-    W = ?ONOFF_WIDTH, H = ?ONOFF_FONT_SIZE,
-    LW = 12,
-    FontSpecL = [{name,"Arial"},{slant,roman},{size,?ONOFF_FONT_SIZE}],
-    FontSpec  = [{name,"Arial"},{weight,bold},{size,?ONOFF_FONT_SIZE}],
-    epxy:new(ID,[{type,switch},
-		 {halign,center},
-		 {x,X+LW},{y,Y},{width,W},{height,H},
-		 {shadow_x,2},{shadow_y,2},{children_first,false},
-		 {round_h,?ONOFF_ROUND_WH},{round_w,?ONOFF_ROUND_WH},
-		 {font,FontSpec},
-		 {fill,solid},{color,lightgray},
-		 {text,"OFF"}
-		]),
-    epxy:new(ID++".label",[{type,text},
-			   {font,FontSpecL},
-			   {font_color,black},
-			   {x,-LW},{y,0},
-			   {width,10},{height,H},
-			   {halign,left},
-			   {text,integer_to_list(Num)}]),
-    epxy:add_callback(ID,switch,?MODULE),
-    {X,Y+H,W+LW,H}.
+    onoff_switch_with_label(ID,Num,X,Y).
 
 din(ID0,Chan,Num,X,Y) ->
     ID = ID0++[$.,$e|integer_to_list(Chan)],
-    W = 24, H = 14,
+    W = 24, H = ?DIN_FONT_SIZE+2,
     LW = 12,
-    FontSpecL = [{name,"Arial"},{slant,roman},{size,?ONOFF_FONT_SIZE}],
+    FontSpecL = [{name,"Arial"},{slant,roman},{size,?LABEL_FONT_SIZE}],
     FontSpec = [{name,"Arial"},{weight,bold},{size,?DIN_FONT_SIZE}],
     epxy:new(ID,[{type,value},
 		 {halign,center},{valign,center},
@@ -1558,9 +1568,9 @@ din(ID0,Chan,Num,X,Y) ->
 
 ain(ID0,Chan,Num,X,Y) ->
     ID = ID0++[$.,$e|integer_to_list(Chan)],
-    W = 40, H = ?AIN_FONT_SIZE,
+    W = 40, H = ?AIN_FONT_SIZE+2,  %% 2 extra to match pout
     LW = 12,
-    FontSpecL = [{name,"Arial"},{weight,medium},{size,?AIN_FONT_SIZE}],
+    FontSpecL = [{name,"Arial"},{weight,roman},{size,?AIN_FONT_SIZE}],
     FontSpec = [{name,"Arial"},{weight,bold},{size,?AIN_FONT_SIZE}],
     epxy:new(ID,[{type,value},
 		 {halign,center},{valign,center},
@@ -1588,14 +1598,14 @@ ain(ID0,Chan,Num,X,Y) ->
 
 aload(ID0,Chan,Num,X,Y) ->
     ID = ID0++[$.,$e|integer_to_list(Chan)],
-    W = 32, H = ?ALOAD_FONT_SIZE,
+    W = 40, H = ?ALOAD_FONT_SIZE+2,
     LW = 12,
-    FontSpecL = [{name,"Arial"},{weight,medium},{size,?ALOAD_FONT_SIZE}],
+    FontSpecL = [{name,"Arial"},{weight,roman},{size,?LABEL_FONT_SIZE}],
     FontSpec = [{name,"Arial"},{weight,bold},{size,?ALOAD_FONT_SIZE}],
     epxy:new(ID,
 	     [{type,value},
 	      {halign,center},{valign,center},
-	      {x,X},{y,Y},{width,W},{height,H},
+	      {x,X+LW},{y,Y},{width,W},{height,H},
 	      {children_first,false},
 	      {font,FontSpec},
 	      {fill,solid},{color,white},
@@ -1619,52 +1629,48 @@ aload(ID0,Chan,Num,X,Y) ->
     
 aout(ID0,Chan,Num,X,Y) ->
     ID = ID0++[$.,$e|integer_to_list(Chan)],
-    W = ?SLIDER_WIDTH+?ONOFF_WIDTH+16, 
-    H = ?ONOFF_FONT_SIZE,
-    LW = 12,
-    FontSpecL = [{name,"Arial"},{weight,medium},{size,?ONOFF_FONT_SIZE}],
-    FontSpec = [{name,"Arial"},{weight,bold},{size,?ONOFF_FONT_SIZE}],
-    epxy:new(ID,[{type,slider},
-		 {x,X+LW+?ONOFF_WIDTH+16},{y,Y+2},
-		 {width,?SLIDER_WIDTH},{height,?SLIDER_HEIGHT},
-		 {fill,solid},{color,lightBlue},
-		 {min,0},{max,65535},
-		 {orientation, horizontal},
-		 {border,1},
-		 {topimage, "$/gordon//priv/knob.png"}
-		]),
-    epxy:add_callback(ID,analog,?MODULE),
-    ID1 = ID++".onoff",
-    epxy:new(ID1,[{type,switch},
-		  {halign,center},
-		  {x,-(?ONOFF_WIDTH+16)},{y,-4},{width,?ONOFF_WIDTH},{height,H},
-		  {shadow_x,2},{shadow_y,2},{children_first,false},
-		  {font,FontSpec},
-		  {fill,solid},{color,lightgray},
-		  {round_h,?ONOFF_ROUND_WH},{round_w,?ONOFF_ROUND_WH},
-		  {text,"OFF"}
-		 ]),
-    epxy:add_callback(ID1,switch,?MODULE),
-    epxy:new(ID++".label",[{type,text},
-			   {font,FontSpecL},
-			   {font_color,black},
-			   {x,-(LW+?ONOFF_WIDTH+16)},{y,-4},
-			   {width,LW},{height,H},
-			   {halign,left},
-			   {text,integer_to_list(Num)}]),
-    {X,Y+H,W+LW,H}.
+    onoff_slider_with_label(ID,Num,X,Y,lightBlue).
 
 pout(ID0,Chan,Num,X,Y) ->
     ID = ID0++[$.,$e|integer_to_list(Chan)],
+    onoff_slider_with_label(ID,Num,X,Y,lightGreen).
+
+onoff_switch_with_label(ID,Num,X,Y) ->
+    FontSpecL = [{name,"Arial"},{slant,roman},{size,?LABEL_FONT_SIZE}],
+    FontSpec  = [{name,"Arial"},{weight,bold},{size,?ONOFF_FONT_SIZE}],
+    W = ?ONOFF_WIDTH, H = ?ONOFF_FONT_SIZE,
+    LW = 12,
+    epxy:new(ID,
+	     [{type,switch},
+	      {halign,center},
+	      {x,X+LW},{y,Y},{width,W},{height,H},
+	      {shadow_x,2},{shadow_y,2},{children_first,false},
+	      {round_h,?ONOFF_ROUND_WH},{round_w,?ONOFF_ROUND_WH},
+	      {font,FontSpec},
+	      {fill,solid},{color,lightgray},
+	      {text,"OFF"}
+	     ]),
+    epxy:add_callback(ID,switch,?MODULE),
+    epxy:new(ID++".label",
+	     [{type,text},
+	      {font,FontSpecL},
+	      {font_color,black},
+	      {x,-LW},{y,0},
+	      {width,10},{height,H},
+	      {halign,left},
+	      {text,integer_to_list(Num)}]),
+    {X,Y+H,W+LW,H}.
+
+onoff_slider_with_label(ID,Num,X,Y,Color) ->
     W = ?SLIDER_WIDTH+?ONOFF_WIDTH+16, 
     H = ?ONOFF_FONT_SIZE,
     LW = 12,
-    FontSpecL = [{name,"Arial"},{weight,medium},{size,?ONOFF_FONT_SIZE}],
+    FontSpecL = [{name,"Arial"},{weight,roman},{size,?LABEL_FONT_SIZE}],
     FontSpec = [{name,"Arial"},{weight,bold},{size,?ONOFF_FONT_SIZE}],
     epxy:new(ID,[{type,slider},
 		 {x,X+LW+?ONOFF_WIDTH+16},{y,Y+2},
 		 {width,?SLIDER_WIDTH},{height,?SLIDER_HEIGHT},
-		 {fill,solid},{color,lightGreen},
+		 {fill,solid},{color,Color},
 		 {min,0},{max,65535},
 		 {orientation, horizontal},
 		 {border, 1},
@@ -1690,6 +1696,7 @@ pout(ID0,Chan,Num,X,Y) ->
 			   {halign,left},
 			   {text,integer_to_list(Num)}]),
     {X,Y+H,W+LW,H}.
+
 
 group_rectangle(ID,Text,X,Y,W,H,Status) ->
     epxy:new(ID,
@@ -2047,16 +2054,24 @@ node_data(Index, Si, Value, State) ->
 			_ -> undefined
 		    end;
 
-		"pds" ->
+		"pds" -> %% fixme make pds send load update = 0.0 when turnoff
 		    case Si of
-			1 -> switch_state("pds.pout.e1.onoff",Value);
-			2 -> switch_state("pds.pout.e2.onoff",Value);
-			3 -> switch_state("pds.pout.e3.onoff",Value);
-			4 -> switch_state("pds.pout.e4.onoff",Value);
-			5 -> switch_state("pds.pout.e5.onoff",Value);
-			6 -> switch_state("pds.pout.e6.onoff",Value);
-			7 -> switch_state("pds.pout.e7.onoff",Value);
-			8 -> switch_state("pds.pout.e8.onoff",Value);
+			1 -> switch_state("pds.pout.e1.onoff",Value),
+			     set_value("pds.aload.e33", 0.0);
+			2 -> switch_state("pds.pout.e2.onoff",Value),
+			     set_value("pds.aload.e34", 0.0);
+			3 -> switch_state("pds.pout.e3.onoff",Value),
+			     set_value("pds.aload.e35", 0.0);
+			4 -> switch_state("pds.pout.e4.onoff",Value),
+			     set_value("pds.aload.e36", 0.0);
+			5 -> switch_state("pds.pout.e5.onoff",Value),
+			     set_value("pds.aload.e37", 0.0);
+			6 -> switch_state("pds.pout.e6.onoff",Value),
+			     set_value("pds.aload.e38", 0.0);
+			7 -> switch_state("pds.pout.e7.onoff",Value),
+			     set_value("pds.aload.e39", 0.0);
+			8 -> switch_state("pds.pout.e8.onoff",Value),
+			     set_value("pds.aload.e40", 0.0);
 			_ -> undefined
 		    end;
 
