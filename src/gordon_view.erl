@@ -54,7 +54,7 @@
 	  dev_info = []    %% Elpc last scanned info
 	}).
 
--define(TEXT_CELL_FONT_SIZE, 18).
+-define(TEXT_CELL_FONT_SIZE, 20).
 -define(DIN_FONT_SIZE, 14).
 -define(DOUT_FONT_SIZE, 14).
 -define(AIN_FONT_SIZE, 14).
@@ -70,7 +70,7 @@
 -define(BUTTON_HEIGHT, 18).
 -define(BUTTON_ROUND_WH, 4).
 
--define(NUM_TABLE_NODES, 16).
+-define(NUM_TABLE_NODES, 14).
 -define(NUM_TABLE_UARTS, 2).
 
 -define(TYPE_NONE,       16#00).
