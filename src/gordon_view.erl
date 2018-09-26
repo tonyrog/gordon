@@ -34,10 +34,33 @@
 
 -define(SERVER, ?MODULE).
 
+-type uart() :: 
+	#{
+	   pos => integer(),
+	   device => string(),
+	   baud => integer(),
+	   control => boolean(),
+	   control_swap => boolean(),
+	   control_inv => boolean(),
+	   status => idle | scan | error | ok
+	 }.
+
+-type cannode() ::
+	#{
+	   pos => integer(),
+	   id  => integer(),
+	   serial => integer(),
+	   vsn => {Major::integer(),Minor::integer()},
+	   product => atom(),
+	   app_vsn => integer(),
+	   status => up | down | boot | flash | ok | error | free,
+	   activity => integer()        %% system time of last activity
+	 }.
+
 -record(state,
 	{
 	  uart,            %% serial flash uart device
-	  timer,           %% CANbus ping timer
+	  echo_timer,      %% CANbus ping timer
 	  hold_mode=false, %% hold the (selected) booting node
 	  selected_tab,    %% "nodes" | "uarts" | undefined
 	  selected_pos,    %% Selected row | undefined
@@ -47,12 +70,16 @@
 	  sdo_error,       %% last sdo_error
 	  row_height = 1,  %% height of row selection area
 	  firmware = [],   %% list of available firmware for upgrade
-	  nodes = [],      %% list of node maps
-	  uarts = [],      %% list of uarts
-	  elpc,            %% Elpc options
-	  dev_type,        %% Elpc devict type
-	  dev_info = []    %% Elpc last scanned info
+	  nodes = [] :: [cannode()],    %% list of can nodes
+	  uarts = [] :: [uart()],       %% list of uarts
+	  elpc,                         %% Elpc options
+	  dev_type,                     %% Elpc devict type
+	  dev_info = []                 %% Elpc last scanned info
 	}).
+
+-define(ACTIVITY_TIMEOUT, (10*1000000)). %% time when node is considered down
+-define(REMOVE_TIMEOUT,  30*1000000).   %% time after wich node is deleted
+-define(ECHO_INTERVAL, 5000).           %% ping every 5s
 
 -define(TEXT_CELL_FONT_SIZE, 20).
 -define(DIN_FONT_SIZE, 14).
@@ -76,8 +103,6 @@
 -define(GROUP_YGAP, 12).
 -define(BUTTON_XGAP, 8).
 -define(BUTTON_YGAP, 12).
-
-
 
 -define(NUM_TABLE_NODES, 14).
 -define(NUM_TABLE_UARTS, 2).
@@ -199,7 +224,10 @@ init(Options) ->
 	       undefined -> undefined
 	   end,
     UARTS = set_elpc_row(Elpc),
-    {ok, #state{ row_height = RH1, firmware = Firmware, 
+
+    EchoTimer = erlang:start_timer(?ECHO_INTERVAL, self(), echo_timeout),
+
+    {ok, #state{ echo_timer = EchoTimer, row_height = RH1, firmware = Firmware, 
 		 nodes = [], uarts = UARTS, elpc = Elpc }}.
 
 %%--------------------------------------------------------------------
@@ -593,6 +621,17 @@ handle_info({analog,ID,[{value,Value}]},State) ->
     end,
     {noreply, State};
 
+handle_info({timeout,Timer,echo_timeout}, State) 
+  when Timer =:= State#state.echo_timer ->
+    %% io:format("echo_timeout\n"),
+    %% request response from all nodes
+    Now = erlang:system_time(micro_seconds),
+    State1 = node_activity(Now, State),
+    send_pdo1_tx(0, ?MSG_ECHO_REQUEST, 0, 0),
+    EchoTimer = erlang:start_timer(?ECHO_INTERVAL, self(), echo_timeout),
+    %% io:format("echo_timeout done\n"),
+    {noreply, State1#state { echo_timer = EchoTimer }};
+
 handle_info(_Info, State) ->
     io:format("gordon_view: got info ~p\n", [_Info]),
     {noreply, State}.
@@ -729,8 +768,9 @@ refresh_node_state(SID, Node, State) ->
 	    epxy:set(SID++".uapp_vsn", [{text,VersText}])
     end,
     case maps:get(status,Node,undefined) of
-	undefined ->
-	    State;
+	undefined -> State;
+	down -> State;
+	free -> State;
 	flash ->
 	    disable_buttons(SID,["go","upgrade"]),
 	    enable_buttons(SID,["reset"]),
@@ -763,8 +803,8 @@ match_uapp_firmware(Node, State) ->
     Vsn = maps:get(vsn, Node, undefined),
     AppVsn = maps:get(app_vsn, Node, undefined),
     AppVersion = gordon_uapp:decode_app_vsn(AppVsn),
-    io:format("Match firmware, ~p\n",
-	      [{Product,Vsn,AppVersion}]),
+    %% io:format("Match firmware, ~p\n",
+    %%  [{Product,Vsn,AppVersion}]),
     match_uapp_firmware_(Product,Vsn,AppVersion,State#state.firmware).
 
 match_uapp_firmware_(Product,Vsn={Major,Minor},AppVersion,
@@ -779,13 +819,13 @@ match_uapp_firmware_(_Product,_Vsn,_AppVersion,[]) ->
     false.
 
 match_uapp_vsn(AppVersion, [{banks,Match,Bs}|Banks]) ->
-    io:format("Match ~p with ~p\n", [AppVersion,Match]),
+    %% io:format("Match ~p with ~p\n", [AppVersion,Match]),
     case proplists:get_value(version,Match) of
 	undefined -> 
 	    match_uapp_vsn(AppVersion,Banks);
 	Version ->
-	    io:format("Node AppVersion=~p, File Version=~p\n",
-		      [AppVersion,Version]),
+	    %% io:format("Node AppVersion=~p, File Version=~p\n",
+	    %%   [AppVersion,Version]),
 	    if AppVersion =:= undefined;
 	       Version > AppVersion -> {true,{Version,Bs}};
 	       true -> match_uapp_vsn(AppVersion, Banks)
@@ -903,7 +943,7 @@ deselect_row(Tab,Pos,State) ->
 	    ok;
 	SID ->
 	    RowID = Tab++".r"++integer_to_list(Pos),
-	    io:format("HIDE (row) id=~p\n", [SID]),
+	    %% io:format("HIDE (row) id=~p\n", [SID]),
 	    epxy:set(SID,[{hidden,all},{disabled,all}]),
 	    epxy:set(RowID,[{hidden,true}])
     end,
@@ -924,12 +964,13 @@ hide_if_selected(Serial,State) ->
 
 hide(State) ->
     hide_pos(State#state.selected_tab,State#state.selected_pos, State).
+
 hide_pos(Tab,Pos,State) ->
     case selected_id(Tab,Pos,State) of
 	undefined ->
 	    ok;
 	SID ->
-	    io:format("HIDE id=~p\n", [SID]),
+	    %% io:format("HIDE id=~p\n", [SID]),
 	    epxy:set(SID,[{hidden,all},{disabled,all}])
     end.
 
@@ -948,7 +989,7 @@ show_pos(Tab,Pos, State) ->
 	undefined ->
 	    ok;
 	SID ->
-	    io:format("SHOW id=~p\n", [SID]),
+	    %% io:format("SHOW id=~p\n", [SID]),
 	    epxy:set(SID,[{hidden,false},{disabled,false}])
     end.
 
@@ -1917,7 +1958,7 @@ node_started(_CobId, Serial, State) ->
 
 node_running(_CobId, Serial, State) ->
     ?dbg("Node ~6.16.0B running\n", [Serial]),
-    case find_node_by_serial(Serial, State#state.nodes) of
+    case take_node_by_serial(Serial, State#state.nodes) of
 	false ->
 	    spawn(
 	      fun() ->
@@ -1935,11 +1976,12 @@ node_running(_CobId, Serial, State) ->
 		      end
 	      end),
 	    {noreply, State};
-	_Node ->
+	{value,N,Ns} ->
+	    Now = erlang:system_time(micro_seconds),
 	    %% Node is present in node list
 	    %% XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
 	    %% send_pdo1_tx(0, ?MSG_REFRESH, 0, 0)
-	    {noreply, State}
+	    {noreply, State#state { nodes=[N#{activity=>Now}|Ns] }}
     end.
 
 node_message(CobID, Index, Si, Value, State) ->
@@ -2139,6 +2181,45 @@ node_data(Index, Si, Value, State) ->
     end,
     {noreply,State}.
 
+
+node_activity(Now, State) ->
+    node_activity_(State#state.nodes, Now, [], State).
+
+node_activity_([N=#{pos := Pos,activity := Then,status := Status}|Ns],
+		    Now,Acc,State) ->
+    if 
+	Now >= Then + ?REMOVE_TIMEOUT, Status =/= free ->
+	    set_text(serial,Pos,""),
+	    set_text(id,Pos,""),
+	    set_text(product,Pos,""),
+	    set_text(vsn,Pos,""),
+	    set_text(status,Pos,free),
+	    Acc1 = [N#{status=>free,serial=>0,id=>0,
+		       product=>undefined,vsn=>0}|Acc],
+	    if Pos =:= State#state.selected_pos ->
+		    State1 = deselect_row(State#state.selected_tab,
+					  State#state.selected_pos,State),
+		    node_activity_(Ns, Now, Acc1, State1);
+	       true ->
+		    node_activity_(Ns, Now, Acc1, State)
+	    end;
+
+	Now >= Then + ?ACTIVITY_TIMEOUT, Status =/= free, Status =/= down ->
+	    set_text(status,Pos,down),
+	    Acc1 = [N#{status=>down}|Acc],
+	    if Pos =:= State#state.selected_pos ->
+		    State1 = deselect_row(State#state.selected_tab,
+					  State#state.selected_pos,State),
+		    node_activity_(Ns, Now, Acc1, State1);
+	       true ->
+		    node_activity_(Ns, Now, Acc1, State)
+	    end;
+	true ->
+	    node_activity_(Ns,Now,[N|Acc],State)
+    end;
+node_activity_([],_Now,Acc,State) ->
+    State#state { nodes=Acc }.
+
 is_selected_by_serial(Serial, State) ->
     case find_node_by_serial(Serial, State#state.nodes) of
 	false ->
@@ -2161,7 +2242,7 @@ selected_id(State) ->
 selected_id("uarts",Pos,State) ->
     case find_by_pos(Pos,State#state.uarts) of
 	false -> undefined;
-	Uart -> "lpc"
+	_Uart -> "lpc"
     end;
 selected_id("nodes",Pos,State) ->
     case find_by_pos(Pos,State#state.nodes) of
@@ -2169,6 +2250,8 @@ selected_id("nodes",Pos,State) ->
 	Node ->
 	    case maps:get(status,Node,undefined) of
 		undefined -> undefined;
+		free -> undefined;
+		down -> undefined;
 		up ->
 		    case maps:get(product,Node,undefined) of
 			undefined -> undefined;
@@ -2195,16 +2278,17 @@ set_value(ID, Value) ->
     epxy:set(ID,[{value,Value}]).
 
 set_status_by_serial(Serial, Status, Ns) ->
+    Now = erlang:system_time(micro_seconds),
     case take_node_by_serial(Serial, Ns) of
 	{value,N=#{ pos := Pos },Ns1} ->
 	    set_text(status,Pos,Status),
-	    [ N#{ status => Status } | Ns1];
+	    [ N#{ status => Status, activity => Now } | Ns1];
 	false ->
-	    Pos = allocate_node_pos(Ns),
+	    {N0=#{pos:=Pos},Ns1} = allocate_node(Ns),
 	    set_text(status,Pos,Status),
 	    set_text(serial,Pos,Serial),
-	    Node = #{ pos => Pos, serial => Serial, status => Status },
-	    [ Node | Ns]
+	    N = N0#{ serial => Serial, status => Status, activity => Now },
+	    [ N | Ns1 ]
     end.
 
 set_value_by_cobid(CobId,Index,SubInd,Value,State) ->
@@ -2251,50 +2335,65 @@ set_by_cobid(CobID,Key,Value,State) ->
 
 set_by_cobid_(CobID,Key,Value,State) ->
     %% ?dbg("set_by_cobid: key=~p, value=~p\n", [Key,Value]),
+    Now = erlang:system_time(micro_seconds),
     case ?is_cobid_extended(CobID) of
 	true ->
 	    Serial = ?XNODE_ID(CobID),
 	    Ns = State#state.nodes,
 	    case take_node_by_serial(Serial, Ns) of
 		false ->
-		    Pos = allocate_node_pos(Ns),
+		    {N0=#{pos:=Pos},Ns1} = allocate_node(Ns),
 		    set_text(serial,Pos,Serial),
 		    set_text(Key,Pos,Value),
-		    N = #{ pos=>Pos, serial=>Serial, Key=>Value },
-		    State#state { nodes=[N|Ns]};
-		{value,N=#{ pos := Pos},Ns1} ->
+		    N = N0#{serial=>Serial,activity=>Now,Key=>Value },
+		    State#state { nodes=[N|Ns1]};
+		{value,N0=#{ pos:=Pos},Ns1} ->
 		    set_text(Key,Pos,Value),
-		    N1 = N#{ Key => Value },
-		    State#state { nodes=[N1|Ns1]}
+		    N = N0#{ activity=>Now, Key => Value },
+		    State#state { nodes=[N|Ns1]}
 	    end;
 	false ->
 	    ID = ?NODE_ID(CobID),
 	    Ns = State#state.nodes,
 	    case take_node_by_id(ID, Ns) of
 		false ->
-		    Pos = allocate_node_pos(Ns),
+		    {N0=#{pos:=Pos},Ns1} = allocate_node(Ns),
 		    set_text(id,Pos,ID),
 		    set_text(Key,Pos,Value),
-		    N = #{ pos=>Pos, id=>ID, Key=>Value },
-		    State#state { nodes=[N|Ns]};
-		{value,N=#{ pos := Pos},Ns1} ->
+		    N = N0#{ id=>ID, activity=>Now, Key=>Value },
+		    State#state { nodes=[N|Ns1]};
+		{value,N0=#{ pos:=Pos},Ns1} ->
 		    set_text(Key,Pos,Value),
-		    N1 = N#{ Key => Value },
-		    State#state { nodes=[N1|Ns1]}
+		    N = N0#{ activity=>Now, Key => Value },
+		    State#state { nodes=[N|Ns1]}
 	    end
     end.
 
-allocate_node_pos(Ns) ->
-    PosList = [ maps:get(pos,N) || N <- Ns] -- [(?NUM_TABLE_NODES+1)],
-    io:format("PosList = ~w\n", [PosList]),
-    Next = if PosList =:= [] -> 1;
-	      true -> lists:max(PosList)+1
-	   end,
-    if Next >= ?NUM_TABLE_NODES ->
-	    ?NUM_TABLE_NODES;  %% FIXME: find free pos
-       true ->
-	    Next
+allocate_node(Ns) ->
+    case free_nodes(Ns) of
+	{[F|Fs],Ns1} ->
+	    {F,Fs++Ns1};
+	{[],_} ->
+	    L = length(Ns),
+	    if L > ?NUM_TABLE_NODES ->
+		    false;
+	       true ->
+		    {#{pos=>L+1},Ns}
+	    end
     end.
+
+free_nodes(Ns) ->
+    free_nodes_(Ns,[],[]).
+
+free_nodes_([N=#{status:=Status}|Ns],Free,Taken) ->
+    if Status =:= free ->
+	    free_nodes_(Ns, [N|Free], Taken);
+       true ->
+	    free_nodes_(Ns, Free, [N|Taken])
+    end;
+free_nodes_([],Free,Taken) ->
+    Free1=lists:sort(fun(A,B) -> maps:get(pos,A) < maps:get(pos,B) end, Free),
+    {Free1,Taken}.
 
 %% set text value in nodes table
 %% nodes.r<pos>.<key>
