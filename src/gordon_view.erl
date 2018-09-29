@@ -88,12 +88,13 @@
 -define(ALOAD_FONT_SIZE, 14).
 -define(BUTTON_FONT_SIZE, 18).
 -define(LABEL_FONT_SIZE, 14).
--define(ONOFF_FONT_SIZE, 18).
+-define(ONOFF_FONT_SIZE, 14).
 -define(ONOFF_ROUND_WH, 4).
+-define(ONOFF_WIDTH,  40).
+-define(ONOFF_HEIGHT, 16).
 -define(GROUP_FONT_SIZE, 12).
 -define(SLIDER_WIDTH,  100).
 -define(SLIDER_HEIGHT, 8).
--define(ONOFF_WIDTH, 40).
 -define(BUTTON_WIDTH, 72).
 -define(BUTTON_HEIGHT, 18).
 -define(BUTTON_ROUND_WH, 4).
@@ -373,41 +374,47 @@ handle_info({node_flashed,ID,Nid,Status,_Result},State) ->
     {noreply, State1};
 
 handle_info({switch,ID,[{value,Value}]},State) ->
-    Si = case ID of
-	     "pdb.pout.e1.onoff" -> 1;
-	     "pdb.pout.e2.onoff" -> 2;
-	     "pdb.pout.e3.onoff" -> 3;
-	     "pdb.pout.e4.onoff" -> 4;
-	     "pdb.aout.e5.onoff" -> 5;
-	     "pdb.aout.e6.onoff" -> 6;
-	     "pdb.dout.e7" -> 7;
-	     "pdb.dout.e8" -> 8;
-	     "pdb.dout.e9" -> 9;
-	     "pdb.dout.e10" -> 10;
+    {SID,Si} = 
+	case ID of
+	    "pdb.pout.e1.onoff" -> {"pdb",1};
+	    "pdb.pout.e2.onoff" -> {"pdb",2};
+	    "pdb.pout.e3.onoff" -> {"pdb",3};
+	    "pdb.pout.e4.onoff" -> {"pdb",4};
+	    "pdb.aout.e5.onoff" -> {"pdb",5};
+	    "pdb.aout.e6.onoff" -> {"pdb",6};
+	    "pdb.dout.e7" -> {"pdb",7};
+	    "pdb.dout.e8" -> {"pdb",8};
+	    "pdb.dout.e9" -> {"pdb",9};
+	    "pdb.dout.e10" -> {"pdb",10};
 	     
-	     "pds.pout.e1.onoff" -> 1;
-	     "pds.pout.e2.onoff" -> 2;
-	     "pds.pout.e3.onoff" -> 3;
-	     "pds.pout.e4.onoff" -> 4;
-	     "pds.pout.e5.onoff" -> 5;
-	     "pds.pout.e6.onoff" -> 6;
-	     "pds.pout.e7.onoff" -> 7;
-	     "pds.pout.e8.onoff" -> 8;
+	    "pds.pout.e1.onoff" -> {"pds",1};
+	    "pds.pout.e2.onoff" -> {"pds",2};
+	    "pds.pout.e3.onoff" -> {"pds",3};
+	    "pds.pout.e4.onoff" -> {"pds",4};
+	    "pds.pout.e5.onoff" -> {"pds",5};
+	    "pds.pout.e6.onoff" -> {"pds",6};
+	    "pds.pout.e7.onoff" -> {"pds",7};
+	    "pds.pout.e8.onoff" -> {"pds",8};
 
-	     "pdi.dout.e1" -> 1;
-	     "pdi.dout.e2" -> 2;
-	     "pdi.dout.e3" -> 3;
-	     "pdi.dout.e4" -> 4;
-	     "pdi.dout.e5" -> 5;
-	     "pdi.dout.e6" -> 6;
-	     "pdi.dout.e7" -> 7;
-	     "pdi.dout.e8" -> 8;
-	     
-	     _ -> -1
-	 end,
+	    "pdi.dout.e1" -> {"pdi",1};
+	    "pdi.dout.e2" -> {"pdi",2};
+	    "pdi.dout.e3" -> {"pdi",3};
+	    "pdi.dout.e4" -> {"pdi",4};
+	    "pdi.dout.e5" -> {"pdi",5};
+	    "pdi.dout.e6" -> {"pdi",6};
+	    "pdi.dout.e7" -> {"pdi",7};
+	    "pdi.dout.e8" -> {"pdi",8};
+	    _ -> {"",-1}
+	end,
     if Si =/= -1 ->
-	    ?dbg("switch send_digital2, ~s value=~w\n", [ID,Value]),
-	    send_digital2(State#state.selected_eff,Si,Value);
+	    SwitchState = get_switch_state(ID),
+	    if SID =:= "pds", SwitchState =:= alarm ->
+		    ?dbg("send_alarm_cnfrm\n", []),
+		    send_alarm_cnfrm(State#state.selected_eff,Si);
+	       true ->
+		    ?dbg("switch send_digital2, ~s value=~w\n", [ID,Value]),
+		    send_digital2(State#state.selected_eff,Si,Value)
+	    end;
        true ->
 	    ok
     end,
@@ -1679,7 +1686,7 @@ pout(ID0,Chan,Num,X,Y) ->
 onoff_switch_with_label(ID,Num,X,Y) ->
     FontSpecL = [{name,"Arial"},{slant,roman},{size,?LABEL_FONT_SIZE}],
     FontSpec  = [{name,"Arial"},{weight,bold},{size,?ONOFF_FONT_SIZE}],
-    W = ?ONOFF_WIDTH, H = ?ONOFF_FONT_SIZE,
+    W = ?ONOFF_WIDTH, H = ?ONOFF_HEIGHT,
     LW = 12,
     epxy:new(ID,
 	     [{type,switch},
@@ -1721,7 +1728,8 @@ onoff_slider_with_label(ID,Num,X,Y,Color) ->
     ID1 = ID++".onoff",
     epxy:new(ID1,[{type,switch},
 		  {halign,center},
-		  {x,-(?ONOFF_WIDTH+16)},{y,-4},{width,?ONOFF_WIDTH},{height,H},
+		  {x,-(?ONOFF_WIDTH+16)},{y,-4},
+		  {width,?ONOFF_WIDTH},{height,?ONOFF_HEIGHT},
 		  {shadow_x,2},{shadow_y,2},{children_first,false},
 		  {font,FontSpec},
 		  {fill,solid},{color,lightgray},
@@ -1733,7 +1741,7 @@ onoff_slider_with_label(ID,Num,X,Y,Color) ->
 			   {font,FontSpecL},
 			   {font_color,black},
 			   {x,-(LW+?ONOFF_WIDTH+16)},{y,-4},
-			   {width,LW},{height,H},
+			   {width,LW},{height,?ONOFF_HEIGHT},
 			   {halign,left},
 			   {text,integer_to_list(Num)}]),
     {X,Y+H,W+LW,H}.
@@ -1797,6 +1805,10 @@ send_digital2(CobId, Si, Value) ->
 send_analog2(CobId, Si, Value) ->
     send_pdo2_tx(CobId,?MSG_ANALOG,Si,Value).
 
+send_alarm_cnfrm(CobId, Si) ->
+    Value = ((CobId band 16#ffffff) bsl 8) bor Si,
+    send_pdo1_tx(0, ?MSG_ALARM_CNFRM, 0, Value).
+
 pdo1_tx(CobID,Data,State) ->
     case Data of
 	<<16#80,?MSG_UBOOT_ON:16/little,_Si:8,Value:32/little>> ->
@@ -1809,6 +1821,8 @@ pdo1_tx(CobID,Data,State) ->
 	    Serial = Value bsr 8,
 	    node_running(CobID, Serial, State);
 	<<16#80,Index:16/little,Si:8,Value:32/little>> ->
+	    io:format("Node message Index=~w si=~w, Value=~w\n", 
+		      [Index,Si,Value]),
 	    node_message(CobID, Index, Si, Value, State);
 	_ ->
 	    io:format("Bad PDO1_TX CobID=~w data=~w\n", [CobID,Data]),
@@ -1995,6 +2009,53 @@ node_message(CobID, Index, Si, Value, State) ->
 
 node_data(Index, Si, Value, State) ->
     case Index of
+	?MSG_ALARM_CNFRM_ACK ->
+	    SID = selected_id(State),
+	    ?dbg("MSG_ALARM_CNFRM_ACK: [~s], si=~w, value=~w\n",
+		 [SID,Si,Value]),
+	    case SID of
+		"pds" ->
+		    send_digital2(State#state.selected_eff,Si,0);
+		_ ->
+		    ok
+	    end;
+	?MSG_ALARM ->
+	    SID = selected_id(State),
+	    ?dbg("MSG_ALARM: [~s], si=~w, value=~w\n",
+		 [SID,Si,Value]),
+	    case SID of
+		"pds" ->
+		    _Loc = (Value bsr 16) band 16#ff,
+		    _OutLoc = (Value bsr 8) band 16#ff,
+		    Cause = case Value band 16#ff of
+				?ALARM_CAUSE_OK    -> "";
+				?ALARM_CAUSE_FUSE  -> "Fuse";
+				?ALARM_CAUSE_SHORT -> "Short";
+				?ALARM_CAUSE_LOW   -> "Low";
+				?ALARM_CAUSE_HIGH  -> "Load";
+				%% Global cause Si should = 0
+				?ALARM_CAUSE_OVERLOAD -> "Overload";
+				?ALARM_CAUSE_HOT -> "Hot";
+				?ALARM_CAUSE_LOW_BAT -> "Bat";
+				?ALARM_CAUSE_LEVEL   -> "Vin";
+				_ -> ""
+			    end,
+		    io:format("Alarm output=~w, cause = ~s\n", [Si,Cause]),
+		    case Si of
+			1 -> switch_state("pds.pout.e1.onoff",Cause);
+			2 -> switch_state("pds.pout.e2.onoff",Cause);
+			3 -> switch_state("pds.pout.e3.onoff",Cause);
+			4 -> switch_state("pds.pout.e4.onoff",Cause);
+			5 -> switch_state("pds.pout.e5.onoff",Cause);
+			6 -> switch_state("pds.pout.e6.onoff",Cause);
+			7 -> switch_state("pds.pout.e7.onoff",Cause);
+			8 -> switch_state("pds.pout.e8.onoff",Cause);
+			0 -> ok; %% fixme display global larm levels 
+			_ -> ok
+		    end;
+		_ ->
+		    ok
+	    end;
 	?MSG_ANALOG ->
 	    SID = selected_id(State),
 	    ?dbg("MSG_ANALOG: [~s], si=~w, value=~w\n",
@@ -2271,8 +2332,20 @@ selected_id(undefined,_Pos,_State) ->
 
 switch_state(ID,0) ->
     epxy:set(ID,[{color,lightgray},{text,"OFF"}]);
-switch_state(ID,_) ->
-    epxy:set(ID,[{color,green},{text,"ON"}]).
+switch_state(ID,1) ->
+    epxy:set(ID,[{color,green},{text,"ON"}]);
+switch_state(ID,"") ->
+    epxy:set(ID,[{color,lightgray},{text,"OFF"}]);
+switch_state(ID,Alarm) ->
+    epxy:set(ID,[{color,red},{text,Alarm}]).
+
+get_switch_state(ID) ->
+    {ok,[{text,Text}]} = epxy:get(ID, [text]),
+    case Text of
+	"OFF" -> off;
+	"ON" -> on;
+	_ -> alarm
+    end.
 
 set_value(ID, Value) ->
     epxy:set(ID,[{value,Value}]).
@@ -2641,7 +2714,3 @@ make_pixels(PixelData,W,H,Format) ->
     Pixmap = epx:pixmap_create(W,H,Format),
     epx:pixmap_put_pixels(Pixmap,0,0,W,H,Format,PixelData,[]),
     Pixmap.
-
-
-      
-    
