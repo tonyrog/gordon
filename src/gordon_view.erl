@@ -161,7 +161,7 @@
 -define(PRODUCT_MK(P,V),     ((((P) bsl 16) band ?PRODUCT_ID_MASK) bor 
 				  ((V) band ?PRODUCT_VSN_MASK))).
 
-%%-define(dbg(F,A), io:format((F),(A))).
+%% -define(dbg(F,A), io:format((F),(A))).
 -define(dbg(F,A), ok).
 -define(warn(F,A), io:format((F),(A))).
 -define(error(F,A), io:format((F),(A))).
@@ -398,7 +398,21 @@ handle_info({select,"uarts.r"++RTxt,[{press,1},{x,_X},{y,_Y}|_]},State) ->
 	_ ->
 	    {noreply, State1}
     end;
-
+handle_info({select,"ubt.product",[{press,1},{x,_},{y,_}|_]},State) ->
+    %% maybe popup meny att correct x,y?
+    epxy:set("ubt.product.menu", [{hidden,false},{disabled,false}]),
+    {noreply,State};
+handle_info({select,"ubt.product",[{press,0},{x,_},{y,_}|_]},State) ->
+    epxy:set("ubt.product.menu", [{hidden,true},{disabled,false}]),
+    {noreply,State};
+handle_info({menu,"ubt.product.menu",[{value,I}]}, State) ->
+    case product(I) of
+	false -> {noreply,State};
+	Product ->
+	    XCobId = State#state.selected_eff,
+	    co_sdo_cli:send_sdo_set(XCobId,?INDEX_BOOT_PRODUCT, 0, Product),
+	    {noreply,State}
+    end;
 handle_info({select,_ID,[{press,0},{x,_},{y,_}|_]},State) ->
     %% ignore mouse release in node selection
     {noreply, State};
@@ -666,13 +680,11 @@ handle_info({analog,ID,[{value,Value}]},State) ->
 
 handle_info({timeout,Timer,echo_timeout}, State) 
   when Timer =:= State#state.echo_timer ->
-    %% io:format("echo_timeout\n"),
     %% request response from all nodes
     Now = erlang:system_time(micro_seconds),
     State1 = node_activity(Now, State),
     send_pdo1_tx(0, ?MSG_ECHO_REQUEST, 0, 0),
     EchoTimer = erlang:start_timer(?ECHO_INTERVAL, self(), echo_timeout),
-    %% io:format("echo_timeout done\n"),
     {noreply, State1#state { echo_timer = EchoTimer }};
 
 handle_info(_Info, State) ->
@@ -726,6 +738,13 @@ product_menu() ->
       {"powerZone2.2",           ?PRODUCT_MK(?PRODUCT_PDS,16#0202)},
       {"powerZone2.2+DMX",       ?PRODUCT_MK(?PRODUCT_PDS_DMX,16#0202)}
     ].
+
+product(I) ->
+    try lists:nth(I, product_menu()) of
+	{_Text, Code} -> Code
+    catch
+	error:_ -> 0
+    end.
 
 set_elpc_row(undefined) ->
     [];
@@ -882,8 +901,6 @@ match_uapp_firmware(Node, State) ->
     Vsn = maps:get(vsn, Node, undefined),
     AppVsn = maps:get(app_vsn, Node, undefined),
     AppVersion = gordon_uapp:decode_app_vsn(AppVsn),
-    %% io:format("Match firmware, ~p\n",
-    %%  [{Product,Vsn,AppVersion}]),
     match_uapp_firmware_(Product,Vsn,AppVersion,State#state.firmware).
 
 match_uapp_firmware_(Product,Vsn={Major,Minor},AppVersion,
@@ -898,13 +915,10 @@ match_uapp_firmware_(_Product,_Vsn,_AppVersion,[]) ->
     false.
 
 match_uapp_vsn(AppVersion, [{banks,Match,Bs}|Banks]) ->
-    %% io:format("Match ~p with ~p\n", [AppVersion,Match]),
     case proplists:get_value(version,Match) of
 	undefined -> 
 	    match_uapp_vsn(AppVersion,Banks);
 	Version ->
-	    %% io:format("Node AppVersion=~p, File Version=~p\n",
-	    %%   [AppVersion,Version]),
 	    if AppVersion =:= undefined;
 	       Version > AppVersion -> {true,{Version,Bs}};
 	       true -> match_uapp_vsn(AppVersion, Banks)
@@ -922,7 +936,6 @@ action_sdo(State, Status, Index, Si, Value) ->
 	Node ->
 	    CurrentStatus = maps:get(status,Node,undefined),
 	    Serial = maps:get(serial,Node,0),
-	    %% io:format("Serial = ~w, Status = ~w\n", [Serial, Status]),
 	    if CurrentStatus =:= Status ->
 		    XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
 		    co_sdo_cli:send_sdo_set(XCobId, Index, Si, Value),
@@ -1022,7 +1035,6 @@ deselect_row(Tab,Pos,State) ->
 	    ok;
 	SID ->
 	    RowID = Tab++".r"++integer_to_list(Pos),
-	    %% io:format("HIDE (row) id=~p\n", [SID]),
 	    epxy:set(SID,[{hidden,all},{disabled,all}]),
 	    epxy:set(RowID,[{hidden,true}])
     end,
@@ -1049,7 +1061,6 @@ hide_pos(Tab,Pos,State) ->
 	undefined ->
 	    ok;
 	SID ->
-	    %% io:format("HIDE id=~p\n", [SID]),
 	    epxy:set(SID,[{hidden,all},{disabled,all}])
     end.
 
@@ -1068,7 +1079,6 @@ show_pos(Tab,Pos, State) ->
 	undefined ->
 	    ok;
 	SID ->
-	    %% io:format("SHOW id=~p\n", [SID]),
 	    epxy:set(SID,[{hidden,false},{disabled,false}])
     end.
 
@@ -1441,10 +1451,10 @@ uBoot(X,Y,_W,_H) ->
     {X11,Y1,W0,H0} = tagged_text("ubt.app_vsn", "Version", X1, Y0, TW),
     {_,_,W00,_} = tagged_text("ubt.uapp_vsn", "Upgrade", X11+XGap, Y0, 0),
 
-    {_,Y2,W1,H1} = tagged_text("ubt.serial", "Serial", X1, Y1+YGap, TW),
-    {_,Y3,W2,H2} = tagged_text("ubt.product", "Product", X1, Y2+YGap, TW),
-    {_,Y4,W3,H3} = tagged_text("ubt.creation", "Creation", X1, Y3+YGap, TW),
-    {_,Y5,W4,H4} = tagged_text("ubt.addr", "Address", X1, Y4+YGap, TW),
+    {_,Y2,W1,H1} = edit_text("ubt.serial", "Serial", X1, Y1+YGap, TW),
+    {_,Y3,W2,H2} = product_menu("ubt.product", "Product", X1, Y2+YGap, TW),
+    {_,Y4,W3,H3} = edit_text("ubt.creation", "Creation", X1, Y3+YGap, TW),
+    {_,Y5,W4,H4} = edit_text("ubt.addr", "Address", X1, Y4+YGap, TW),
 
     {W5,H5} = add_uboot_buttons(ID, X1, Y5+YGap),
 
@@ -1482,7 +1492,6 @@ uartBoot(X,Y,_W,_H) ->
     YGap = ?GROUP_FONT_SIZE,
     Y0 = YGap,
     X1 = XGap,
-    ID = "uart",
     TW = 96,
     {_,Y1,W0,H0} = tagged_text("uart.vsn", "Version", X1, Y0, TW),
     {_,Y2,W1,H1} = tagged_text("uart.product", "Product", X1, Y1+YGap, TW),
@@ -1500,10 +1509,10 @@ uartBoot(X,Y,_W,_H) ->
     YY0 = YGap,
     XX0 = XGap,
     {_,YY1,WW0,HH0} = tagged_text("uart.ubt.app_vsn","Version",X1,YY0,TW),
-    {_,YY2,WW1,HH1} = tagged_text("uart.ubt.serial","Serial", X1, YY1+YGap, TW),
-    {_,YY3,WW2,HH2} = tagged_text("uart.ubt.product","Product",X1,YY2+YGap,TW),
-    {_,YY4,WW3,HH3} = tagged_text("uart.ubt.creation","Creation",X1,YY3+YGap,TW),
-    {_,YY5,WW4,HH4} = tagged_text("uart.ubt.addr","Address",X1,YY4+YGap,TW),
+    {_,YY2,WW1,HH1} = edit_text("uart.ubt.serial","Serial", X1, YY1+YGap, TW),
+    {_,YY3,WW2,HH2} = edit_text("uart.ubt.product","Product",X1,YY2+YGap,TW),
+    {_,YY4,WW3,HH3} = edit_text("uart.ubt.creation","Creation",X1,YY3+YGap,TW),
+    {_,YY5,WW4,HH4} = edit_text("uart.ubt.addr","Address",X1,YY4+YGap,TW),
     {WW5,HH5} = add_urt_buttons("uart.ubt", XX0, YY5+YGap),
 
     WWt = XGap+lists:max([WW0,WW1,WW2,WW3,WW4,WW5])+XGap+XOffs*2,
@@ -1889,12 +1898,12 @@ group_rectangle(ID,Text,X,Y,W,H,Status) ->
 	      {height,10}  %% width,25
 	     ]).
 
-tagged_text(ID,TagText,X,Y,TagWidth) ->
+
+product_menu(ID,TagText,X,Y,TagWidth) ->
     FontSpec = [{name,"Arial"},{slant,roman},{size,?GROUP_FONT_SIZE}],
     {ok,Font} = epx_font:match(FontSpec),
     {Wt,Ht} = epx_font:dimension(Font,TagText),
     XOffs = max(Wt+4,TagWidth),
-    H = Ht+2,
     W = 8*10,
     epxy:new(ID,
 	     [{type,text},
@@ -1907,9 +1916,66 @@ tagged_text(ID,TagText,X,Y,TagWidth) ->
 	      {x,X+XOffs},{y,Y},
 	      {height,Ht}, {width,W}
 	     ]),
+    epxy:add_callback(ID,select,?MODULE), 
+    epxy:new(ID++".tag",
+	     [{type,text},
+	      {font,Font},
+	      {font_color, black},
+	      {text,TagText},
+	      {color,white},{fill,solid},
+	      {valign,center},
+	      {halign,left},
+	      {x,-XOffs},{y,0},
+	      {height,Ht}
+	     ]),
+    MenuFontSpec = [{name,"Arial"},{size,10}],
+    {ok,MenuFont} = epx_font:match(MenuFontSpec),
+    {Wt,Ht} = epx_font:dimension(Font,TagText),
+    H = Ht+2,
+    XOffs = max(Wt+4,TagWidth),
+    epxy:new(ID++".menu", 
+	     [{type,menu},
+	      {hidden,true},{disabled,true},
+	      {items,[Text||{Text,_ProductCode}<-product_menu()]},
+	      {font, MenuFont},
+	      {border,2},
+	      {border_color,black},
+	      {color, gray}, {fill, solid},
+	      {x,0}, {y,0}]),
+    epxy:add_callback(ID++".menu",menu,?MODULE), 
+
+    {X+XOffs+W+2,Y+H,XOffs+W+2,H}.
+
+
+tagged_text(ID,TagText,X,Y,TagWidth) ->
+    tagged_text(ID,TagText,X,Y,TagWidth,false).
+
+edit_text(ID,TagText,X,Y,TagWidth) ->
+    tagged_text(ID,TagText,X,Y,TagWidth,true).
+
+tagged_text(ID,TagText,X,Y,TagWidth,Edit) ->
+    FontSpec = [{name,"Arial"},{slant,roman},{size,?GROUP_FONT_SIZE}],
+    {ok,Font} = epx_font:match(FontSpec),
+    {Wt,Ht} = epx_font:dimension(Font,TagText),
+    XOffs = max(Wt+4,TagWidth),
+    H = Ht+2,
+    W = 8*10,
+    epxy:new(ID,
+	     [{type,text},
+	      {font,Font},
+	      {edit,Edit},
+	      {font_color, black},
+	      {text,""},
+	      {color,white},{fill,solid},
+	      {valign,center},
+	      {halign,left},
+	      {x,X+XOffs},{y,Y},
+	      {height,Ht}, {width,W}
+	     ]),
+    BorderColor = if Edit -> green; true -> black end,
     epxy:new(ID++".border",
 	     [{type,rectangle},
-	      {color,black},
+	      {color,BorderColor},
 	      {x,-1},{y,-1},
 	      {width,W+2},{height,H+2}]),
     epxy:new(ID++".tag",
@@ -2615,7 +2681,29 @@ format_date(Value) when is_integer(Value) ->
     {{Year,Mon,Day},{_H,_M,_S}} = 
 	calendar:gregorian_seconds_to_datetime(Value+62167219200),
     lists:flatten(io_lib:format("~4..0w-~2..0w-~2..0w", 
-				[Year,Mon,Day])).    
+				[Year,Mon,Day])).
+
+format_product(Code) ->
+    case Code bsr 16 of
+	?PRODUCT_PDS_DMX -> "powerZone+DMX";
+	?PRODUCT_PDB_DMX -> "bridgeZone+DMX";
+	?PRODUCT_PDB_KELLY -> "bridgeZone+Kelly";
+	?PRODUCT_PDB_MARINCO -> "bridgeZone+Marinco";
+	?PRODUCT_PDC_80 -> "controlZone-80";
+	?PRODUCT_PDC_08 -> "controlZone-08";
+	?PRODUCT_PDC_44 -> "controlZone-44";
+	?PRODUCT_PDC_71 -> "controlZone-71";
+	?PRODUCT_PDI_24 -> "ioZone-24";
+	?PRODUCT_PDI_12 -> "ioZone-12-Analog";
+	Code16 -> %% unknown variant
+	    case Code16 band 16#ff of
+		?PRODUCT_PDS -> "powerZone";
+		?PRODUCT_PDC -> "controlZone";
+		?PRODUCT_PDI -> "ioZone";
+		?PRODUCT_PDB -> "bridgeZone";
+		_ -> "Unknown"
+	    end
+    end.
 
 format_value(serial,Value) when is_integer(Value) ->
     tl(integer_to_list(16#1000000+Value, 16));
@@ -2629,25 +2717,12 @@ format_value(app_vsn,{{Year,Mon,Day},{_H,_M,_S}}) ->
 format_value(app_addr, Value) when is_integer(Value) -> 
     format_hex32(Value);
 format_value(product, Product) when is_integer(Product) ->
-    case Product bsr 16 of
-	?PRODUCT_PDS_DMX -> "powerZone+DMX";
-	?PRODUCT_PDB_DMX -> "bridgeZone+DMX";
-	?PRODUCT_PDB_KELLY -> "bridgeZone+Kelly";
-	?PRODUCT_PDB_MARINCO -> "bridgeZone+Marinco";
-	?PRODUCT_PDC_80 -> "controlZone-80";
-	?PRODUCT_PDC_08 -> "controlZone-08";
-	?PRODUCT_PDC_44 -> "controlZone-44";
-	?PRODUCT_PDC_71 -> "controlZone-71";
-	?PRODUCT_PDI_24 -> "ioZone-24";
-	?PRODUCT_PDI_12 -> "ioZone-12-Analog";
-	Prod ->
-	    case Prod band 16#ff of
-		?PRODUCT_PDS -> "powerZone";
-		?PRODUCT_PDC -> "controlZone";
-		?PRODUCT_PDI -> "ioZone";
-		?PRODUCT_PDB -> "bridgeZone";
-		_ -> "Unknown"
-	    end
+    case (Product bsr 16) band 16#ff of
+	?PRODUCT_PDS -> "powerZone";
+	?PRODUCT_PDC -> "controlZone";
+	?PRODUCT_PDI -> "ioZone";
+	?PRODUCT_PDB -> "bridgeZone";
+	_ -> "Unknown"
     end;
 format_value(app_vsn,Value) when is_integer(Value) ->
     case Value of
