@@ -91,7 +91,7 @@
 -define(ONOFF_FONT_SIZE, 14).
 -define(ONOFF_ROUND_WH, 4).
 -define(ONOFF_WIDTH,  40).
--define(ONOFF_HEIGHT, 16).
+-define(ONOFF_HEIGHT, 18).
 -define(GROUP_FONT_SIZE, 12).
 -define(SLIDER_WIDTH,  100).
 -define(SLIDER_HEIGHT, 8).
@@ -124,6 +124,42 @@
 -define(TYPE_OUT_BACKLIGHT, 16#0B).
 -define(TYPE_DMX,         16#08).
 -define(TYPE_INPUT,       16#FF).
+
+-define(PRODUCT_ANY,         16#0000).
+-define(PRODUCT_PDS,         16#0001).
+-define(PRODUCT_PDS_1A,      16#0101).
+-define(PRODUCT_PDS_DMX,     16#0201).
+-define(PRODUCT_PDS_DMX_1A,  16#0301).
+-define(PRODUCT_PDC_80,      16#8002).
+-define(PRODUCT_PDC_08,      16#0802).
+-define(PRODUCT_PDC_44,      16#4402).
+-define(PRODUCT_PDC_71,      16#7102).
+-define(PRODUCT_PDC_8F,      16#8F02).
+-define(PRODUCT_PDC,         16#0002).
+-define(PRODUCT_PANEL,       16#0002).
+-define(PRODUCT_PDD_25,      16#2503).
+-define(PRODUCT_PDD,         16#0003).
+-define(PRODUCT_PDI,         16#0004).
+-define(PRODUCT_PDI_24,      16#0004).
+-define(PRODUCT_PDI_12,      16#0104).
+-define(PRODUCT_INPUT,       16#0004).
+-define(PRODUCT_FUSE,        16#0005).
+-define(PRODUCT_ADC,         16#0006).
+-define(PRODUCT_REMOTE,      16#0007).
+-define(PRODUCT_RFID,        16#0008).
+-define(PRODUCT_PDB,         16#0009).
+-define(PRODUCT_PDB_DMX,     16#0209).
+-define(PRODUCT_PDB_MARINCO, 16#0409).
+-define(PRODUCT_PDB_KELLY,   16#0809).
+-define(PRODUCT_VPULSE,      16#000A).
+-define(PRODUCT_ISOTTA_WHEEL,16#000B).
+-define(PRODUCT_DEV,         16#00FF).
+-define(PRODUCT_DEV_MCB2100, 16#21FF).
+
+-define(PRODUCT_ID_MASK,     16#FFFF0000).
+-define(PRODUCT_VSN_MASK,    16#0000FFFF).
+-define(PRODUCT_MK(P,V),     ((((P) bsl 16) band ?PRODUCT_ID_MASK) bor 
+				  ((V) band ?PRODUCT_VSN_MASK))).
 
 %%-define(dbg(F,A), io:format((F),(A))).
 -define(dbg(F,A), ok).
@@ -211,7 +247,7 @@ init(Options) ->
     ioZone(X,Y,W,H),
     powerZone(X,Y,W,H),
     uBoot(X,Y,W,H),
-    lpcBoot(X,Y,W,H),
+    uartBoot(X,Y,W,H),
 
     can_router:attach(),
 
@@ -350,7 +386,7 @@ handle_info({select,"uarts.r"++RTxt,[{press,1},{x,_X},{y,_Y}|_]},State) ->
     case selected_id(Tab,Pos,State1) of
 	undefined ->
 	    {noreply, State1};
-	"lpc" ->
+	"uart" ->
 	    highlight_row(Tab,Pos),
 	    State2 = State1#state { selected_tab = Tab,
 				    selected_pos = Pos,
@@ -672,6 +708,25 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
+%% Product menu
+product_menu() ->
+    [ { "powerZone3.2",          ?PRODUCT_MK(?PRODUCT_PDS,16#0302)},
+      { "powerZone3.2+DMX",      ?PRODUCT_MK(?PRODUCT_PDS_DMX,16#0302)},
+      { "bridgeZone3.2",         ?PRODUCT_MK(?PRODUCT_PDB,16#0302)},
+      { "bridgeZone3.2+DMX",     ?PRODUCT_MK(?PRODUCT_PDB_DMX,16#0302)},
+      { "bridgeZone3.2+Kelly",   ?PRODUCT_MK(?PRODUCT_PDB_KELLY,16#0302)},
+      { "bridgeZone3.2+Marinco", ?PRODUCT_MK(?PRODUCT_PDB_MARINCO,16#0302)},
+      { "ioZone3.3-24",          ?PRODUCT_MK(?PRODUCT_PDI_24,16#0303)},
+      { "ioZone3.3-12-Analog",   ?PRODUCT_MK(?PRODUCT_PDI_12,16#0303)},
+      { "controlZone-80",        ?PRODUCT_MK(?PRODUCT_PDC_80,16#0202)},
+      { "controlZone-08",        ?PRODUCT_MK(?PRODUCT_PDC_08,16#0202)},
+      { "controlZone-44",        ?PRODUCT_MK(?PRODUCT_PDC_44,16#0202)},
+      { "controlZone-71",        ?PRODUCT_MK(?PRODUCT_PDC_71,16#0202)},
+      %% not current 
+      {"powerZone2.2",           ?PRODUCT_MK(?PRODUCT_PDS,16#0202)},
+      {"powerZone2.2+DMX",       ?PRODUCT_MK(?PRODUCT_PDS_DMX,16#0202)}
+    ].
+
 set_elpc_row(undefined) ->
     [];
 set_elpc_row(Elpc) ->
@@ -744,7 +799,7 @@ set_elpc_info(Info) ->
     epxy:set("lpc.variant", [{text,format_value(variant,Variant)}]),
     ok.
 
-%% FIXME: update button status according to state
+
 %%  upgrade iff state=boot and firmware is available and correct
 %%  factory/save/hold iff state=up
 %%  go state=boot
@@ -783,6 +838,16 @@ refresh_node_state(SID, Node, State) ->
 	    enable_buttons(SID,["reset"]),
 	    State;
 	boot ->
+	    Serial = maps:get(serial,Node,0),
+	    epxy:set(SID++".serial", [{text,format_value(serial,Serial)}]), 
+	    %% fixme: menu
+	    Product = maps:get(product, Node, 0),
+	    epxy:set(SID++".product", [{text,format_hex32(Product)}]),
+	    Creation = maps:get(creation, Node, 0),
+	    epxy:set(SID++".creation", [{text,format_date(Creation)}]),
+	    AppAddr = maps:get(app_addr,Node,0),
+	    epxy:set(SID++".addr", [{text,format_value(app_addr,AppAddr)}]),
+	    %% 
 	    enable_buttons(SID,["reset","go"]),
 	    case UAppMatch of
 		false ->
@@ -806,7 +871,14 @@ enable_buttons(PDx, Bs) ->
 	B <- Bs].
 
 match_uapp_firmware(Node, State) ->
-    Product = maps:get(product,Node,undefined),
+    Prod = (maps:get(product,Node,0) bsr 16) band 16#ff,
+    Product = case Prod of
+		  ?PRODUCT_PDS -> powerZone;
+		  ?PRODUCT_PDI -> ioZone;
+		  ?PRODUCT_PDB -> bridgeZone;
+		  ?PRODUCT_PDC -> controlZone;
+		  _ -> undefined
+	      end,
     Vsn = maps:get(vsn, Node, undefined),
     AppVsn = maps:get(app_vsn, Node, undefined),
     AppVersion = gordon_uapp:decode_app_vsn(AppVsn),
@@ -1262,7 +1334,7 @@ bridgeZone(X,Y,_W,_H) ->
     ID = "pdb",
 
     {X11,Y1,_W0,H0} = tagged_text("pdb.app_vsn", "Version", X1, Y0, 0),
-    {_,_,_,_} = tagged_text("pdb.uapp_vsn", "UApp", X11+XGap, Y0, 0),
+    {_,_,_,_} = tagged_text("pdb.uapp_vsn", "Updgrade", X11+XGap, Y0, 0),
 
     %% Aout x 2 (row=Y1,column X1)
     {_,Y2,W1,H1} = aout_group("pdb.aout", 5, 6, X1, Y1+YGap),
@@ -1297,7 +1369,7 @@ ioZone(X,Y,_W,_H) ->
     ID = "pdi",
 
     {X11,Yn,_W0,H0} = tagged_text("pdi.app_vsn", "Version", X1, Y0, 0),
-    {_,_,_,_} = tagged_text("pdi.uapp_vsn", "UApp", X11+XGap, Y0, 0),
+    {_,_,_,_} = tagged_text("pdi.uapp_vsn", "Upgrade", X11+XGap, Y0, 0),
     Y1 = Yn,
 
     %% Din x 12 (row Y3,column=X1) support iozone24?
@@ -1326,7 +1398,7 @@ powerZone(X,Y,_W,_H) ->
     ID = "pds",
 
     {X11,Y1,_W0,H0} = tagged_text("pds.app_vsn", "Version", X1, Y0, 0),
-    {_,_,_,_} = tagged_text("pds.uapp_vsn", "UApp", X11+XGap, Y0, 0),
+    {_,_,_,_} = tagged_text("pds.uapp_vsn", "Upgrade", X11+XGap, Y0, 0),
 
     %% Ain x 8 (row=Y1,column=X1)
     {_,_Y3,W2,H2} = ain_group("pds.ain", 1, 8, X1, Y1+YGap),
@@ -1358,19 +1430,26 @@ powerZone(X,Y,_W,_H) ->
 %%    Go  Upgrade Reset
 %%
 uBoot(X,Y,_W,_H) ->
+    XOffs = 4,
     XGap = ?TOP_XGAP,
     YGap = ?GROUP_FONT_SIZE,
     Y0 = YGap,
     X1 = XGap,
     ID = "ubt",
 
-    {X11,Y1,W0,H0} = tagged_text("ubt.app_vsn", "Version", X1, Y0, 0),
-    {_,_,W1,_} = tagged_text("ubt.uapp_vsn", "UApp", X11+XGap, Y0, 0),
+    TW = 64,
+    {X11,Y1,W0,H0} = tagged_text("ubt.app_vsn", "Version", X1, Y0, TW),
+    {_,_,W00,_} = tagged_text("ubt.uapp_vsn", "Upgrade", X11+XGap, Y0, 0),
 
-    {W6,H6} = add_uboot_buttons(ID, X1, Y1+YGap),
+    {_,Y2,W1,H1} = tagged_text("ubt.serial", "Serial", X1, Y1+YGap, TW),
+    {_,Y3,W2,H2} = tagged_text("ubt.product", "Product", X1, Y2+YGap, TW),
+    {_,Y4,W3,H3} = tagged_text("ubt.creation", "Creation", X1, Y3+YGap, TW),
+    {_,Y5,W4,H4} = tagged_text("ubt.addr", "Address", X1, Y4+YGap, TW),
 
-    Wt = XGap+max(W0+W1,W6)+XGap,
-    Ht = YGap+H0+YGap+H6+YGap,
+    {W5,H5} = add_uboot_buttons(ID, X1, Y5+YGap),
+
+    Wt = XGap+lists:max([W0+W00,W1,W2,W3,W4,W5])+XGap+XOffs*2,
+    Ht = YGap+lists:sum([H0,H1,H2,H3,H4,H5])+6*YGap,
 
     group_rectangle(ID,"uBoot",X,Y,Wt,Ht,all),
     ok.
@@ -1384,31 +1463,60 @@ uBoot(X,Y,_W,_H) ->
 %% maxCopySize
 %% variant
 %%
-lpcBoot(X,Y,_W,_H) ->
+%% Also lpc.ubt
+%% hold uboot by sending a number (0.5s interval) of \n 
+%% after reset. (wait for ">")
+%% then send serial commands to set
+%% serial, product, creation, address
+%% may also send go and reset serial commands "go\n" and "reset\n"
+%% refresh by issue "show\n" and parse result
+%% "  serial: 0x31105501\n
+%%   product: 0x00010202\n
+%%  datetime: 1538308276\n
+%%      addr: 0x00010000\n
+%%       vsn: 0x000283d8\n"
+%%
+uartBoot(X,Y,_W,_H) ->
+    XOffs = 4,
     XGap = ?TOP_XGAP,
     YGap = ?GROUP_FONT_SIZE,
     Y0 = YGap,
     X1 = XGap,
-    ID = "lpc",
+    ID = "uart",
     TW = 96,
-    {_,Y1,W0,H0} = tagged_text("lpc.vsn", "Version", X1, Y0, TW),
-    {_,Y2,W1,H1} = tagged_text("lpc.product", "Product", X1, Y1+YGap, TW),
-    {_,Y3,W2,H2} = tagged_text("lpc.flashSize", "FlashSize", X1, Y2+YGap, TW),
-    {_,Y4,W3,H3} = tagged_text("lpc.ramSize", "RamSize", X1, Y3+YGap, TW),
-    {_,Y5,W4,H4} = tagged_text("lpc.flashSectors", "Sectors", X1, Y4+YGap, TW),
-    {_,Y6,W5,H5} = tagged_text("lpc.maxCopySize", "MaxCopySize",X1,Y5+YGap,TW),
-    {_,Y7,W6,H6} = tagged_text("lpc.variant", "Variant", X1, Y6+YGap,TW),
-
-    {W7,H7} = add_lpc_buttons(ID, X1, Y7+YGap, 0, 0),
+    {_,Y1,W0,H0} = tagged_text("uart.vsn", "Version", X1, Y0, TW),
+    {_,Y2,W1,H1} = tagged_text("uart.product", "Product", X1, Y1+YGap, TW),
+    {_,Y3,W2,H2} = tagged_text("uart.flashSize", "FlashSize", X1, Y2+YGap, TW),
+    {_,Y4,W3,H3} = tagged_text("uart.ramSize", "RamSize", X1, Y3+YGap, TW),
+    {_,Y5,W4,H4} = tagged_text("uart.flashSectors", "Sectors", X1, Y4+YGap, TW),
+    {_,Y6,W5,H5} = tagged_text("uart.maxCopySize", "MaxCopySize",X1,Y5+YGap,TW),
+    {_,Y7,W6,H6} = tagged_text("uart.variant", "Variant", X1, Y6+YGap,TW),
+    {W7,H7} = add_lpc_buttons("uart", X1, Y7+YGap),
+    Y8 = Y7+YGap+H7,
 
     Wt = XGap+lists:max([W0,W1,W2,W3,W4,W5,W6,W7])+XGap,
     Ht = YGap+lists:sum([H0,H1,H2,H3,H4,H5,H6,H7])+8*YGap,
 
-    group_rectangle(ID,"lpcBoot",X,Y,Wt,Ht,all),
+    YY0 = YGap,
+    XX0 = XGap,
+    {_,YY1,WW0,HH0} = tagged_text("uart.ubt.app_vsn","Version",X1,YY0,TW),
+    {_,YY2,WW1,HH1} = tagged_text("uart.ubt.serial","Serial", X1, YY1+YGap, TW),
+    {_,YY3,WW2,HH2} = tagged_text("uart.ubt.product","Product",X1,YY2+YGap,TW),
+    {_,YY4,WW3,HH3} = tagged_text("uart.ubt.creation","Creation",X1,YY3+YGap,TW),
+    {_,YY5,WW4,HH4} = tagged_text("uart.ubt.addr","Address",X1,YY4+YGap,TW),
+    {WW5,HH5} = add_urt_buttons("uart.ubt", XX0, YY5+YGap),
+
+    WWt = XGap+lists:max([WW0,WW1,WW2,WW3,WW4,WW5])+XGap+XOffs*2,
+    HHt = YGap+lists:sum([HH0,HH1,HH2,HH3,HH4,HH5])+6*YGap,
+
+    group_rectangle("uart.ubt","uBoot",X1,Y8,WWt,HHt,false),
+
+    group_rectangle("uart","lpcBoot",X,Y,max(Wt,WWt),Ht+HHt,all),
+
     ok.
 
 %% add hold and go buttons
-add_lpc_buttons(ID, X, Y, _W, _H) ->
+add_lpc_buttons(ID, X, Y) ->
     W = ?BUTTON_WIDTH,
     H = ?BUTTON_HEIGHT,
     YGap = ?BUTTON_YGAP,
@@ -1436,6 +1544,21 @@ add_uboot_buttons(ID, X, Y) ->
     Y0 = Y,
     add_text_button(ID++".go",      "Go",      X0, Y0, W, H),
     add_text_button(ID++".upgrade", "Upgrade", X1, Y0, W, H),
+    add_text_button(ID++".reset",   "Reset",   X2, Y0, W, H),
+    {3*W+1*XGap,1*H+1*YGap}.
+
+%% add uboot / uart buttons
+add_urt_buttons(ID, X, Y) ->
+    W = ?BUTTON_WIDTH,
+    H = ?BUTTON_HEIGHT,
+    YGap = ?BUTTON_YGAP,
+    XGap = ?BUTTON_XGAP,
+    X0 = X,
+    X1 = X0 + W + XGap,
+    X2 = X1 + W + XGap,
+    Y0 = Y,
+    add_text_button(ID++".hold",    "Hold",    X0, Y0, W, H),
+    add_text_button(ID++".go",      "Go",      X1, Y0, W, H),
     add_text_button(ID++".reset",   "Reset",   X2, Y0, W, H),
     {3*W+1*XGap,1*H+1*YGap}.
 
@@ -1616,7 +1739,7 @@ din(ID0,Chan,Num,X,Y) ->
 
 ain(ID0,Chan,Num,X,Y) ->
     ID = ID0++[$.,$e|integer_to_list(Chan)],
-    W = 40, H = ?AIN_FONT_SIZE+4,  %% 3 extra to match pout
+    W = 40, H = ?AIN_FONT_SIZE+4,  %% extra to match pout
     LW = 12,
     FontSpecL = [{name,"Arial"},{weight,medium},{size,?AIN_FONT_SIZE}],
     FontSpec = [{name,"Arial"},{weight,bold},{size,?AIN_FONT_SIZE}],
@@ -1686,7 +1809,8 @@ pout(ID0,Chan,Num,X,Y) ->
 onoff_switch_with_label(ID,Num,X,Y) ->
     FontSpecL = [{name,"Arial"},{slant,roman},{size,?LABEL_FONT_SIZE}],
     FontSpec  = [{name,"Arial"},{weight,bold},{size,?ONOFF_FONT_SIZE}],
-    W = ?ONOFF_WIDTH, H = ?ONOFF_HEIGHT,
+    W = ?ONOFF_WIDTH, 
+    H = ?ONOFF_HEIGHT,
     LW = 12,
     epxy:new(ID,
 	     [{type,switch},
@@ -1711,7 +1835,7 @@ onoff_switch_with_label(ID,Num,X,Y) ->
 
 onoff_slider_with_label(ID,Num,X,Y,Color) ->
     W = ?SLIDER_WIDTH+?ONOFF_WIDTH+16, 
-    H = ?ONOFF_FONT_SIZE,
+    H = ?ONOFF_HEIGHT,
     LW = 12,
     FontSpecL = [{name,"Arial"},{weight,medium},{size,?LABEL_FONT_SIZE}],
     FontSpec = [{name,"Arial"},{weight,bold},{size,?ONOFF_FONT_SIZE}],
@@ -1778,6 +1902,7 @@ tagged_text(ID,TagText,X,Y,TagWidth) ->
 	      {font_color, black},
 	      {text,""},
 	      {color,white},{fill,solid},
+	      {valign,center},
 	      {halign,left},
 	      {x,X+XOffs},{y,Y},
 	      {height,Ht}, {width,W}
@@ -1793,9 +1918,10 @@ tagged_text(ID,TagText,X,Y,TagWidth) ->
 	      {font_color, black},
 	      {text,TagText},
 	      {color,white},{fill,solid},
+	      {valign,center},
 	      {halign,left},
 	      {x,-XOffs},{y,0},
-	      {height,10}
+	      {height,Ht}
 	     ]),
     {X+XOffs+W+2,Y+H,XOffs+W+2,H}.
 
@@ -1821,11 +1947,10 @@ pdo1_tx(CobID,Data,State) ->
 	    Serial = Value bsr 8,
 	    node_running(CobID, Serial, State);
 	<<16#80,Index:16/little,Si:8,Value:32/little>> ->
-	    io:format("Node message Index=~w si=~w, Value=~w\n", 
-		      [Index,Si,Value]),
+	    ?dbg("mpdo1 index=~w si=~w, Value=~w\n",[Index,Si,Value]),
 	    node_message(CobID, Index, Si, Value, State);
 	_ ->
-	    io:format("Bad PDO1_TX CobID=~w data=~w\n", [CobID,Data]),
+	    io:format("bad pdo1_tx CobID=~w data=~w\n", [CobID,Data]),
 	    {noreply, State}
     end.
 
@@ -1981,7 +2106,10 @@ node_running(_CobId, Serial, State) ->
 		      co_sdo_cli:send_sdo_get(XCobId, ?INDEX_ID, 0),
 		      co_sdo_cli:send_sdo_get(XCobId, ?IX_IDENTITY_OBJECT,
 					      ?SI_IDENTITY_PRODUCT),
+		      co_sdo_cli:send_sdo_get(XCobId, ?IX_IDENTITY_OBJECT,
+					      ?SI_IDENTITY_REVISION),
 		      co_sdo_cli:send_sdo_get(XCobId, ?INDEX_BOOT_APP_VSN, 0),
+		      co_sdo_cli:send_sdo_get(XCobId, ?INDEX_BOOT_APP_ADDR, 0),
 		      co_sdo_cli:send_sdo_get(XCobId, ?INDEX_BOOT_VSN, 0),
 		      if XCobId =:= State#state.selected_eff ->
 			      send_pdo1_tx(0, ?MSG_REFRESH, 0, 0);
@@ -2040,7 +2168,7 @@ node_data(Index, Si, Value, State) ->
 				?ALARM_CAUSE_LEVEL   -> "Vin";
 				_ -> ""
 			    end,
-		    io:format("Alarm output=~w, cause = ~s\n", [Si,Cause]),
+		    ?dbg("Alarm output=~w, cause = ~s\n", [Si,Cause]),
 		    case Si of
 			1 -> switch_state("pds.pout.e1.onoff",Cause);
 			2 -> switch_state("pds.pout.e2.onoff",Cause);
@@ -2303,7 +2431,7 @@ selected_id(State) ->
 selected_id("uarts",Pos,State) ->
     case find_by_pos(Pos,State#state.uarts) of
 	false -> undefined;
-	_Uart -> "lpc"
+	_Uart -> "uart"
     end;
 selected_id("nodes",Pos,State) ->
     case find_by_pos(Pos,State#state.nodes) of
@@ -2314,12 +2442,11 @@ selected_id("nodes",Pos,State) ->
 		free -> undefined;
 		down -> undefined;
 		up ->
-		    case maps:get(product,Node,undefined) of
-			undefined -> undefined;
-			powerZone ->   "pds";
-			ioZone ->      "pdi";
-			bridgeZone ->  "pdb";
-			controlZone -> "pdc";
+		    case (maps:get(product,Node,0) bsr 16) band 16#ff of
+			?PRODUCT_PDS -> "pds";
+			?PRODUCT_PDI -> "pdi";
+			?PRODUCT_PDB -> "pdb";
+			?PRODUCT_PDC -> "pdc";
 			_ -> undefined
 		    end;
 		boot  -> "ubt";
@@ -2369,25 +2496,16 @@ set_value_by_cobid(CobId,Index,SubInd,Value,State) ->
 	?INDEX_ID ->
 	    set_by_cobid(CobId,id,Value,State);
 	?IX_IDENTITY_OBJECT when SubInd =:= ?SI_IDENTITY_PRODUCT ->
-	    Product = (Value bsr 16) band 16#ff,
-	    %% _Variant = (Value bsr 24) band 16#ff,
 	    Major = (Value bsr 8) band 16#ff,
 	    Minor = Value band 16#ff,
 	    State1 = set_by_cobid(CobId,vsn,{Major,Minor},State),
-	    case Product of
-		1 ->
-		    set_by_cobid(CobId,product,powerZone,State1);
-		2 -> 
-		    set_by_cobid(CobId,product,controlZone,State1);
-		4 ->
-		    set_by_cobid(CobId,product,ioZone,State1);
-		9 ->
-		    set_by_cobid(CobId,product,bridgeZone,State1);
-		_ ->
-		    State1
-	    end;
+	    set_by_cobid(CobId,product,Value,State1);
+	?IX_IDENTITY_OBJECT when SubInd =:= ?SI_IDENTITY_REVISION ->
+	    set_by_cobid(CobId,creation,Value,State);
 	?INDEX_BOOT_APP_VSN ->
 	    set_by_cobid(CobId,app_vsn,Value,State);
+	?INDEX_BOOT_APP_ADDR ->
+	    set_by_cobid(CobId,app_addr,Value,State);
 	?INDEX_BOOT_VSN ->
 	    set_by_cobid(CobId,status,boot,State);
 	_ ->
@@ -2490,6 +2608,15 @@ set_uart_text(Key,Pos,Value) ->
 	    ok
     end.
 
+format_hex32(Value) when is_integer(Value) ->
+    tl(integer_to_list(16#100000000+Value, 16)).
+
+format_date(Value) when is_integer(Value) ->
+    {{Year,Mon,Day},{_H,_M,_S}} = 
+	calendar:gregorian_seconds_to_datetime(Value+62167219200),
+    lists:flatten(io_lib:format("~4..0w-~2..0w-~2..0w", 
+				[Year,Mon,Day])).    
+
 format_value(serial,Value) when is_integer(Value) ->
     tl(integer_to_list(16#1000000+Value, 16));
 format_value(device,Value) when is_list(Value) ->
@@ -2499,16 +2626,35 @@ format_value(vsn,{Major,Minor}) ->
 format_value(app_vsn,{{Year,Mon,Day},{_H,_M,_S}}) ->
     lists:flatten(io_lib:format("~4..0w-~2..0w-~2..0w", 
 				[Year,Mon,Day]));
-format_value(app_vsn,Value) ->
+format_value(app_addr, Value) when is_integer(Value) -> 
+    format_hex32(Value);
+format_value(product, Product) when is_integer(Product) ->
+    case Product bsr 16 of
+	?PRODUCT_PDS_DMX -> "powerZone+DMX";
+	?PRODUCT_PDB_DMX -> "bridgeZone+DMX";
+	?PRODUCT_PDB_KELLY -> "bridgeZone+Kelly";
+	?PRODUCT_PDB_MARINCO -> "bridgeZone+Marinco";
+	?PRODUCT_PDC_80 -> "controlZone-80";
+	?PRODUCT_PDC_08 -> "controlZone-08";
+	?PRODUCT_PDC_44 -> "controlZone-44";
+	?PRODUCT_PDC_71 -> "controlZone-71";
+	?PRODUCT_PDI_24 -> "ioZone-24";
+	?PRODUCT_PDI_12 -> "ioZone-12-Analog";
+	Prod ->
+	    case Prod band 16#ff of
+		?PRODUCT_PDS -> "powerZone";
+		?PRODUCT_PDC -> "controlZone";
+		?PRODUCT_PDI -> "ioZone";
+		?PRODUCT_PDB -> "bridgeZone";
+		_ -> "Unknown"
+	    end
+    end;
+format_value(app_vsn,Value) when is_integer(Value) ->
     case Value of
 	16#00000000 -> "zero";
 	16#2F5EBD7A -> "empty";
 	16#FFFFFFFF -> "none";
-	_ ->
-	    {{Year,Mon,Day},{_H,_M,_S}} = 
-		calendar:gregorian_seconds_to_datetime(Value+62167219200),
-	    lists:flatten(io_lib:format("~4..0w-~2..0w-~2..0w", 
-					[Year,Mon,Day]))
+	_ -> format_date(Value)
     end;
 format_value(_Key,Int) when is_integer(Int) -> integer_to_list(Int);
 format_value(_Key,Text) when is_atom(Text) -> Text;
