@@ -556,7 +556,7 @@ handle_info({button,[_,_,_|".save"],[{value,1}]},State) ->
 handle_info({button,[_,_,_|".restore"],[{value,1}]},State) ->
     {noreply, action_sdo(State,up,?IX_RESTORE_DEFAULT_PARAMETERS,1,<<"daol">>)};
 
-handle_info({button,[_,_,_|".lpc_scan"],[{value,1}]},State) ->
+handle_info({button,"uart.lpc_scan",[{value,1}]},State) ->
     if State#state.uart =:= undefined, 
        is_list(State#state.elpc) ->
 	    %% fixme open using correct device if multiple!
@@ -580,7 +580,7 @@ handle_info({button,[_,_,_|".lpc_scan"],[{value,1}]},State) ->
 				      end,
 			    Info = elpcisp:info(U),
 			    set_elpc_info(Info),
-			    set_elpc_status(idle),
+			    set_elpc_status(open),
 			    {noreply, State#state { uart = U,
 						    dev_info = Info,
 						    dev_type = DevType }};
@@ -607,11 +607,12 @@ handle_info({button,[_,_,_|".lpc_scan"],[{value,1}]},State) ->
 	    {noreply, State#state { dev_info = [], dev_type = undefined }}
     end;
 
-handle_info({button,[_,_,_|".lpc_flash"],[{value,1}]},State) ->
+handle_info({button,"uart.lpc_flash",[{value,1}]},State) ->
     case lists:keyfind(ihex,1,State#state.firmware) of
 	{ihex,Firmware} when State#state.uart =/= undefined ->
 	    case elpcisp:unlock(State#state.uart) of
 		{ok,_} ->
+		    set_elpc_status(flash),
 		    case flash_firmware(State#state.uart, Firmware, 
 					State#state.dev_type) of
 			ok ->
@@ -627,7 +628,7 @@ handle_info({button,[_,_,_|".lpc_flash"],[{value,1}]},State) ->
 	    {noreply, State}
     end;
 
-handle_info({button,[_,_,_|".lpc_go"],[{value,1}]},State) ->
+handle_info({button,"uart.lpc_go",[{value,1}]},State) ->
     if State#state.uart =:= undefined ->
 	    {noreply, State};
        true ->
@@ -637,7 +638,7 @@ handle_info({button,[_,_,_|".lpc_go"],[{value,1}]},State) ->
 	    end,
 	    {noreply, State}
     end;
-handle_info({button,[_,_,_|".lpc_reset"],[{value,1}]},State) ->
+handle_info({button,"uart.lpc_reset",[{value,1}]},State) ->
     if State#state.uart =:= undefined ->
 	    {noreply, State};
        true ->
@@ -809,13 +810,13 @@ set_elpc_info(Info) ->
     FlashSectors = proplists:get_value(flashSectors, Info),
     MaxCopySize = proplists:get_value(maxCopySize, Info),
     Variant = proplists:get_value(variant, Info),
-    epxy:set("lpc.vsn", [{text,format_value(vsn,Vsn)}]),
-    epxy:set("lpc.product", [{text,Product}]),
-    epxy:set("lpc.flashSize", [{text,format_value(flashSize,FlashSize)}]),
-    epxy:set("lpc.ramSize", [{text,format_value(ramSize,RamSize)}]),
-    epxy:set("lpc.flashSectors", [{text,format_value(flashSectors,FlashSectors)}]),
-    epxy:set("lpc.maxCopySize", [{text,format_value(maxCopySize,MaxCopySize)}]),
-    epxy:set("lpc.variant", [{text,format_value(variant,Variant)}]),
+    epxy:set("uart.vsn", [{text,format_value(vsn,Vsn)}]),
+    epxy:set("uart.product", [{text,Product}]),
+    epxy:set("uart.flashSize", [{text,format_value(flashSize,FlashSize)}]),
+    epxy:set("uart.ramSize", [{text,format_value(ramSize,RamSize)}]),
+    epxy:set("uart.flashSectors", [{text,format_value(flashSectors,FlashSectors)}]),
+    epxy:set("uart.maxCopySize", [{text,format_value(maxCopySize,MaxCopySize)}]),
+    epxy:set("uart.variant", [{text,format_value(variant,Variant)}]),
     ok.
 
 
@@ -2443,6 +2444,8 @@ node_activity(Now, State) ->
 node_activity_([N=#{pos := Pos,activity := Then,status := Status}|Ns],
 		    Now,Acc,State) ->
     if 
+	Status =:= flash ->
+	    node_activity_(Ns,Now,[N|Acc],State);
 	Now >= Then + ?REMOVE_TIMEOUT, Status =/= free ->
 	    set_text(serial,Pos,""),
 	    set_text(id,Pos,""),
