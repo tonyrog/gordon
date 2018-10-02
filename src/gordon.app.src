@@ -1,13 +1,15 @@
 {application, gordon,
  [
-  {description, ""},
-  {vsn, "0.5"},
-  {registered, []},
+  {description, "Seazone node test and flash tool"},
+  {vsn, git},
+  {registered, [gordon_srv]},
   {applications, [
                   kernel,
                   stdlib,
-		  hex,
-		  lager
+		  lager,
+		  can,
+		  epx,
+		  elpcisp
                  ]},
-  {env, []}
+  {mod, { gordon_app, []}}
  ]}.

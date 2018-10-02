@@ -6,7 +6,7 @@
 %%% @end
 %%% Created :  4 Jun 2018 by Tony Rogvall <tony@rogvall.se>
 %%%-------------------------------------------------------------------
--module(gordon_view).
+-module(gordon_srv).
 
 -behaviour(gen_server).
 
@@ -16,10 +16,10 @@
 -include_lib("canopen/include/co_app.hrl").
 -include_lib("elpcisp/src/elpcisp.hrl").
 %% API
--export([start_link/0, start/0]).
--export([start_rpi/0]).
+-export([start_link/0]).
 
--export([event/3]).  %% fixme better unique callback name
+-export([event/3]).        %% fixme better unique callback name
+-export([event_filter/6]).
 
 -compile(export_all).
 
@@ -161,8 +161,8 @@
 -define(PRODUCT_MK(P,V),     ((((P) bsl 16) band ?PRODUCT_ID_MASK) bor 
 				  ((V) band ?PRODUCT_VSN_MASK))).
 
-%% -define(dbg(F,A), io:format((F),(A))).
--define(dbg(F,A), ok).
+-define(dbg(F,A), io:format((F),(A))).
+%% -define(dbg(F,A), ok).
 -define(warn(F,A), io:format((F),(A))).
 -define(error(F,A), io:format((F),(A))).
 
@@ -180,35 +180,6 @@
 start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
-start() ->
-    (catch error_logger:tty(false)),
-    application:start(lager),
-    application:load(gordon),
-    application:load(can),
-    application:set_env(can, wakeup, true),
-    application:start(can),
-    can_udp:start(),
-    epxy:start_link([{width,800}, {height,480}]),
-    gen_server:start({local, ?SERVER}, ?MODULE, [{width,800}, {height,480}],
-		     []).
-
-%% start rpi with touch screen
-start_rpi() ->
-    (catch error_logger:tty(false)),
-    application:start(lager),
-    ok = application:load(epx),
-    application:set_env(epx, backend, "fb"),
-    application:set_env(epx, pixel_format, 'argb/little'),
-    application:set_env(epx, input_mouse_device, "/dev/input/event0"),
-    application:load(gordon),
-    application:load(can),
-    application:set_env(can, wakeup, true),
-    application:start(can),
-    can_udp:start(),
-    %% can_usb:start(0),
-    epxy:start_link([{width,800}, {height,480}]),
-    gen_server:start({local, ?SERVER}, ?MODULE, [{width,800},{height,480}],
-		     []).
 
 firmware_info() ->
     gen_server:call(?SERVER, firmware_info).
@@ -229,20 +200,25 @@ firmware_info() ->
 %% @end
 %%--------------------------------------------------------------------
 init(Options) ->
+    %% options list override env
+    Env = Options ++ application:get_all_env(gordon),
     epxy:set("screen",[{static,false}]), %% allow close
     epxy:add_callback("screen",event,?MODULE),
-    Width  = proplists:get_value(width, Options, 800),
-    Height = proplists:get_value(height, Options, 480),
+    Width  = proplists:get_value(screen_width, Env, 800),
+    Height = proplists:get_value(screen_height, Env, 480),
     XOffs = 8,
     YOffs = 8,
     {_X1,Y1,RH1} = node_table(XOffs,YOffs,Width div 2, Height),
     {_X2,_Y2,_RH2} = uart_table(XOffs,Y1+2*YOffs,Width div 2, Height),
+
+    product_popup_menu(),
 
     %% define various layouts
     X = Width div 2,
     Y = 10,
     W = Width div 3,
     H = Height - 32,
+
     bridgeZone(X,Y,W,H),
     ioZone(X,Y,W,H),
     powerZone(X,Y,W,H),
@@ -256,13 +232,12 @@ init(Options) ->
 
     Firmware = load_firmware(),
 
-    Elpc = case application:get_env(gordon, elpc) of
-	       {ok,ElpcEnv} -> ElpcEnv;
-	       undefined -> undefined
-	   end,
+    Elpc = proplists:get_value(elpc,Env,undefined),
     UARTS = set_elpc_row(Elpc),
 
     EchoTimer = erlang:start_timer(?ECHO_INTERVAL, self(), echo_timeout),
+
+    
 
     {ok, #state{ echo_timer = EchoTimer, row_height = RH1, firmware = Firmware, 
 		 nodes = [], uarts = UARTS, elpc = Elpc }}.
@@ -391,21 +366,22 @@ handle_info({select,"uarts.r"++RTxt,[{press,1},{x,_X},{y,_Y}|_]},State) ->
 	    State2 = State1#state { selected_tab = Tab,
 				    selected_pos = Pos,
 				    selected_eff = undefined,
-				    selected_sff =  undefined
+				    selected_sff = undefined
 				    },
 	    show_pos(Tab,Pos,State2),
-	    {noreply, State2};
+	    State3 = refresh_uart_state(State2),
+	    {noreply, State3};
 	_ ->
 	    {noreply, State1}
     end;
-handle_info({select,"ubt.product",[{press,1},{x,_},{y,_}|_]},State) ->
-    %% maybe popup meny att correct x,y?
-    epxy:set("ubt.product.menu", [{hidden,false},{disabled,false}]),
+handle_info({select,"ubt.product",
+	     [{press,1},{x,_},{y,_},{xy,{Gx,Gy}}|_]},State) ->
+    epxy:set("Product_menu", [{x,Gx},{y,Gy},{hidden,false},{disabled,false}]),
     {noreply,State};
 handle_info({select,"ubt.product",[{press,0},{x,_},{y,_}|_]},State) ->
-    epxy:set("ubt.product.menu", [{hidden,true},{disabled,false}]),
+    epxy:set("Product_menu", [{hidden,true},{disabled,false}]),
     {noreply,State};
-handle_info({menu,"ubt.product.menu",[{value,I}]}, State) ->
+handle_info({menu,"Product_menu",[{value,I}|_]}, State) ->
     case product(I) of
 	false -> {noreply,State};
 	Product ->
@@ -417,13 +393,7 @@ handle_info({select,_ID,[{press,0},{x,_},{y,_}|_]},State) ->
     %% ignore mouse release in node selection
     {noreply, State};
 
-handle_info({node_flashed,ID,Nid,Status,_Result},State) ->
-    State1 = set_by_cobid(Nid,status,Status,State),
-    epxy:set(ID,[{value,0.0}]),
-    %% if Result == error then signal in window
-    {noreply, State1};
-
-handle_info({switch,ID,[{value,Value}]},State) ->
+handle_info({switch,ID,[{value,Value}|_]},State) ->
     {SID,Si} = 
 	case ID of
 	    "pdb.pout.e1.onoff" -> {"pdb",1};
@@ -471,7 +441,7 @@ handle_info({switch,ID,[{value,Value}]},State) ->
     {noreply, State};
 
 %% send a reset and set hold mode
-handle_info({button,[_,_,_|".hold"],[{value,1}]},State) ->
+handle_info({button,[_,_,_|".hold"],[{value,1}|_]},State) ->
     case find_node_by_pos(State#state.selected_tab,
 			  State#state.selected_pos,
 			  State#state.nodes) of
@@ -484,7 +454,7 @@ handle_info({button,[_,_,_|".hold"],[{value,1}]},State) ->
     end;
 
 %% leave boot mode
-handle_info({button,[_,_,_|".go"],[{value,1}]},State) ->
+handle_info({button,[_,_,_|".go"],[{value,1}|_]},State) ->
     WDT = 1,
     {noreply,action_sdo(State,boot,?INDEX_UBOOT_GO,0,WDT)};
 %%
@@ -494,7 +464,7 @@ handle_info({button,[_,_,_|".go"],[{value,1}]},State) ->
 %% start process disable all input (except flash dialog)
 %% show progress remove flash dialog and enable input
 %%
-handle_info({button,[_,_,_|".upgrade"],[{value,1}]},State) ->
+handle_info({button,[_,_,_|".upgrade"],[{value,1}|_]},State) ->
     case find_node_by_pos(State#state.selected_tab,
 			  State#state.selected_pos,
 			  State#state.nodes) of
@@ -511,7 +481,7 @@ handle_info({button,[_,_,_|".upgrade"],[{value,1}]},State) ->
     end;
 
 %% reset the node
-handle_info({button,[_,_,_|".reset"],[{value,1}]},State) ->
+handle_info({button,[_,_,_|".reset"],[{value,1}|_]},State) ->
     %% send a reset and set hold mode
     case find_node_by_pos(State#state.selected_tab,
 			  State#state.selected_pos,
@@ -524,7 +494,7 @@ handle_info({button,[_,_,_|".reset"],[{value,1}]},State) ->
 	    {noreply,State#state{hold_mode = false }}
     end;
 
-handle_info({button,[_,_,_|".setup"],[{value,1}]},State) ->
+handle_info({button,[_,_,_|".setup"],[{value,1}|_]},State) ->
     case find_node_by_pos(State#state.selected_tab,
 			  State#state.selected_pos,
 			  State#state.nodes) of
@@ -547,18 +517,17 @@ handle_info({button,[_,_,_|".setup"],[{value,1}]},State) ->
 	    end
     end;
 
-handle_info({button,[_,_,_|".factory"],[{value,1}]},State) ->
+handle_info({button,[_,_,_|".factory"],[{value,1}|_]},State) ->
     {noreply,action_sdo(State,up,?IX_RESTORE_DEFAULT_PARAMETERS,4,<<"daol">>)};
 
-handle_info({button,[_,_,_|".save"],[{value,1}]},State) ->
+handle_info({button,[_,_,_|".save"],[{value,1}|_]},State) ->
     {noreply,action_sdo(State,up,?IX_STORE_PARAMETERS,1,<<"evas">>)};
 
-handle_info({button,[_,_,_|".restore"],[{value,1}]},State) ->
+handle_info({button,[_,_,_|".restore"],[{value,1}|_]},State) ->
     {noreply, action_sdo(State,up,?IX_RESTORE_DEFAULT_PARAMETERS,1,<<"daol">>)};
 
-handle_info({button,"uart.lpc_scan",[{value,1}]},State) ->
-    if State#state.uart =:= undefined, 
-       is_list(State#state.elpc) ->
+handle_info({button,"uart.lpc_open",[{value,1}|_]},State) ->
+    if State#state.uart =:= undefined, is_list(State#state.elpc) ->
 	    %% fixme open using correct device if multiple!
 	    Elpc = State#state.elpc,
 	    ElpcDevice = proplists:get_value(device,Elpc),
@@ -572,24 +541,31 @@ handle_info({button,"uart.lpc_scan",[{value,1}]},State) ->
 	    set_elpc_status(sync),
 	    case elpcisp:open(ElpcDevice, ElpcBaud) of
 		{ok,U} ->
-		    case elpcisp:sync(U, 3) of
+		    case elpcisp:sync_osc(U, 4, 1000, "12000") of
 			{ok,_} ->
-			    DevType = case elpcisp:read_device_type(U) of
-					  {ok,DT} -> DT;
-					  _ -> undefined
-				      end,
-			    Info = elpcisp:info(U),
-			    set_elpc_info(Info),
-			    set_elpc_status(open),
-			    {noreply, State#state { uart = U,
-						    dev_info = Info,
-						    dev_type = DevType }};
+			    case elpcisp:read_device_type(U) of
+				{ok,DT} ->
+				    Info = elpcisp:info(U),
+				    set_elpc_info(Info),
+				    set_elpc_status(open),
+				    {noreply, State#state { uart = U,
+							    dev_info = Info,
+							    dev_type = DT }};
+				_Error ->
+				    elpcisp:close(U),
+				    ?dbg("elpcisp read error ~p\n", [_Error]),
+				    set_elpc_status(error),
+				    {noreply, State}
+			    end;
 			_Error ->
+			    elpcisp:close(U),
+			    ?dbg("elpcisp read error ~p\n", [_Error]),
 			    set_elpc_status(error),
 			    set_elpc_info([]),
 			    {noreply, State}
 		    end;
 		_Error ->
+		    ?dbg("elpcisp open error ~p\n", [_Error]),
 		    set_elpc_status(error),
 		    set_elpc_info([]),
 		    {noreply, State}
@@ -607,20 +583,25 @@ handle_info({button,"uart.lpc_scan",[{value,1}]},State) ->
 	    {noreply, State#state { dev_info = [], dev_type = undefined }}
     end;
 
-handle_info({button,"uart.lpc_flash",[{value,1}]},State) ->
+handle_info({button,"uart.lpc_flash",[{value,1}|_]},State) ->
     case lists:keyfind(ihex,1,State#state.firmware) of
 	{ihex,Firmware} when State#state.uart =/= undefined ->
 	    case elpcisp:unlock(State#state.uart) of
 		{ok,_} ->
+		    Elpc = State#state.elpc,
+		    ElpcBaud = proplists:get_value(baud,Elpc,38400),
+		    elpcisp:flash_set_baudrate(State#state.uart,ElpcBaud),
 		    set_elpc_status(flash),
-		    case flash_firmware(State#state.uart, Firmware, 
+		    case flash_firmware(State#state.uart, Firmware,
 					State#state.dev_type) of
 			ok ->
-			    set_elpc_status(ok);
+			    set_elpc_status(open);
 			_Error ->
+			    ?dbg("elpcisp flash error ~p\n", [_Error]),
 			    set_elpc_status(error)
 		    end;
 		_Error ->
+		    ?dbg("elpcisp unlock error ~p\n", [_Error]),
 		    set_elpc_status(error)
 	    end,
 	    {noreply, State};
@@ -628,31 +609,31 @@ handle_info({button,"uart.lpc_flash",[{value,1}]},State) ->
 	    {noreply, State}
     end;
 
-handle_info({button,"uart.lpc_go",[{value,1}]},State) ->
+handle_info({button,"uart.lpc_go",[{value,1}|_]},State) ->
     if State#state.uart =:= undefined ->
 	    {noreply, State};
        true ->
 	    case elpcisp:go(State#state.uart, 0) of
-		{ok,_} -> set_elpc_status(idle);
+		{ok,_} -> set_elpc_status(open);
 		_Error -> set_elpc_status(error)
 	    end,
 	    {noreply, State}
     end;
-handle_info({button,"uart.lpc_reset",[{value,1}]},State) ->
+handle_info({button,"uart.lpc_reset",[{value,1}|_]},State) ->
     if State#state.uart =:= undefined ->
 	    {noreply, State};
        true ->
 	    case elpcisp:reset(State#state.uart) of
-		{ok,_} -> set_elpc_status(idle);
+		{ok,_} -> set_elpc_status(open);
 		_Error -> set_elpc_status(error)
 	    end,
 	    {noreply, State}
     end;
-handle_info({button,_ID,[{value,0}]},State) ->
+handle_info({button,_ID,[{value,0}|_]},State) ->
     %% ignore button release
     {noreply,State};
 
-handle_info({analog,ID,[{value,Value}]},State) ->
+handle_info({analog,ID,[{value,Value}|_]},State) ->
     Si = case ID of
 	     "pdb.aout.e5" -> 5;
 	     "pdb.aout.e6" -> 6;
@@ -678,6 +659,12 @@ handle_info({analog,ID,[{value,Value}]},State) ->
 	    ok
     end,
     {noreply, State};
+
+handle_info({node_flashed,ID,Nid,Status,_Result},State) ->
+    State1 = set_by_cobid(Nid,status,Status,State),
+    epxy:set(ID,[{value,0.0}]),
+    %% if Result == error then signal in window
+    {noreply, State1};
 
 handle_info({timeout,Timer,echo_timeout}, State) 
   when Timer =:= State#state.echo_timer ->
@@ -768,7 +755,7 @@ set_elpc_row(Elpc) ->
     set_elpc_status(idle),
     [ #{ pos => 1, device => ElpcDevice, baud => ElpcBaud,
 	 control => ElpcControl, control_swap => ElpcControlSwap,
-	 control_inv => ElpcControlInv, status => scan } ].
+	 control_inv => ElpcControlInv, status => idle } ].
 
 uint1(true) -> 1;
 uint1(false) -> 0.
@@ -881,6 +868,24 @@ refresh_node_state(SID, Node, State) ->
 	    enable_buttons(SID,["setup","factory","save","restore"]),
 	    State
     end.
+
+refresh_uart_state(State) ->
+    case find_uart_by_pos(State#state.selected_tab,
+			  State#state.selected_pos,
+			  State#state.nodes) of
+	false -> State;
+	Uart -> refresh_uart_state(selected_id(State),Uart,State)
+    end.
+
+refresh_uart_state(SID, Uart, State) ->
+    if State#state.uart =:= undefined ->
+	    enable_buttons(SID,["lpc_open", "lpc_reset"]),
+	    disable_buttons(SID, ["lpc_go", "lpc_flash"]);
+       true ->
+	    enable_buttons(SID,["lpc_reset", "lpc_go", "lpc_flash"]),
+	    disable_buttons(SID, ["lpc_open"])
+    end,
+    State.
 
 disable_buttons(PDx, Bs) ->
     [epxy:set(PDx++"."++B, [{font_color,white},{disabled,true}]) ||
@@ -1027,6 +1032,32 @@ event(Signal,ID,Env) ->
     %% just send it as info message to access
     ?dbg("Got event callback ~p\n", [{Signal,ID,Env}]),
     ?SERVER ! {Signal,ID,Env}.
+
+%% Filter callback
+event_filter(filter,Event,Widget,Window,XY,dec) ->
+    Valid = [$\r,$\e,$\t,$\b,$0,$1,$2,$3,$4,$5,$5,$6,$7,$8,$9],
+    case Event of
+	{key_press,Sym,_Mode,_Code} ->
+	    lists:member(Sym, Valid);
+	{key_release,Sym,_Mode,_Code} ->
+	    lists:member(Sym, Valid);
+	_ ->
+	    true
+    end;
+event_filter(filter,Event,Widget,Window,XY,hex) ->
+    Valid = [$\r,$\e,$\t,$\b,$0,$1,$2,$3,$4,$5,$5,$6,$7,$8,$9,
+	     $a,$b,$c,$d,$e,$f,$A,$B,$C,$D,$E,$F],
+    case Event of
+	{key_press,Sym,_Mode,_Code} ->
+	    lists:member(Sym, Valid);
+	{key_release,Sym,_Mode,_Code} ->
+	    lists:member(Sym, Valid);
+	_ ->
+	    true
+    end;
+event_filter(_Type,_Event,_Widget,_Window,_XY,_Arg) ->
+    true.
+
 
 deselect_row(undefined,_Pos, State) -> State;
 deselect_row(_Tab,undefined, State) -> State;
@@ -1453,9 +1484,11 @@ uBoot(X,Y,_W,_H) ->
     {_,_,W00,_} = tagged_text("ubt.uapp_vsn", "Upgrade", X11+XGap, Y0, 0),
 
     {_,Y2,W1,H1} = edit_text("ubt.serial", "Serial", X1, Y1+YGap, TW),
+    epxy:set("ubt.serial", [{filter,{?MODULE,event_filter,[dec]}}]),
     {_,Y3,W2,H2} = product_menu("ubt.product", "Product", X1, Y2+YGap, TW),
     {_,Y4,W3,H3} = edit_text("ubt.creation", "Creation", X1, Y3+YGap, TW),
     {_,Y5,W4,H4} = edit_text("ubt.addr", "Address", X1, Y4+YGap, TW),
+    epxy:set("ubt.addr", [{filter,{?MODULE,event_filter,[hex]}}]),
 
     {W5,H5} = add_uboot_buttons(ID, X1, Y5+YGap),
 
@@ -1507,13 +1540,17 @@ uartBoot(X,Y,_W,_H) ->
     Wt = XGap+lists:max([W0,W1,W2,W3,W4,W5,W6,W7])+XGap,
     Ht = YGap+lists:sum([H0,H1,H2,H3,H4,H5,H6,H7])+8*YGap,
 
+    %% FIXME: this group is hidden when product is powerZone+DMX
+    %%        since UART is not initialized 
     YY0 = YGap,
     XX0 = XGap,
     {_,YY1,WW0,HH0} = tagged_text("uart.ubt.app_vsn","Version",X1,YY0,TW),
     {_,YY2,WW1,HH1} = edit_text("uart.ubt.serial","Serial", X1, YY1+YGap, TW),
+    epxy:set("uart.ubt.serial", [{filter,{?MODULE,event_filter,[dec]}}]),
     {_,YY3,WW2,HH2} = edit_text("uart.ubt.product","Product",X1,YY2+YGap,TW),
     {_,YY4,WW3,HH3} = edit_text("uart.ubt.creation","Creation",X1,YY3+YGap,TW),
     {_,YY5,WW4,HH4} = edit_text("uart.ubt.addr","Address",X1,YY4+YGap,TW),
+    epxy:set("uart.ubt.addr", [{filter,{?MODULE,event_filter,[hex]}}]),
     {WW5,HH5} = add_urt_buttons("uart.ubt", XX0, YY5+YGap),
 
     WWt = XGap+lists:max([WW0,WW1,WW2,WW3,WW4,WW5])+XGap+XOffs*2,
@@ -1539,7 +1576,7 @@ add_lpc_buttons(ID, X, Y) ->
     add_text_button(ID++".lpc_go",      "Go",      X0, Y0, W, H),
     add_text_button(ID++".lpc_flash",   "Flash",   X1, Y0, W, H),
     add_text_button(ID++".lpc_reset",   "Reset",   X2, Y0, W, H),
-    add_text_button(ID++".lpc_scan",    "Scan",    X3, Y0, W, H),
+    add_text_button(ID++".lpc_open",    "Open",    X3, Y0, W, H),
     {4*W+4*XGap,1*H+1*YGap}.
 
 %% add hold and go buttons
@@ -1899,12 +1936,27 @@ group_rectangle(ID,Text,X,Y,W,H,Status) ->
 	      {height,10}  %% width,25
 	     ]).
 
+product_popup_menu() ->
+    MenuFontSpec = [{name,"Arial"},{size,10}],
+    {ok,MenuFont} = epx_font:match(MenuFontSpec),
+    epxy:new("Product_menu", 
+	     [{type,menu},
+	      {hidden,true},{disabled,true},
+	      {items,[Text||{Text,_ProductCode}<-product_menu()]},
+	      {font, MenuFont},
+	      {border,2},
+	      {border_color,black},
+	      {color, gray}, {fill, solid},
+	      {x,0}, {y,0}]),
+    epxy:add_callback("product_menu",menu,?MODULE).
 
+%% Tagged text
 product_menu(ID,TagText,X,Y,TagWidth) ->
     FontSpec = [{name,"Arial"},{slant,roman},{size,?GROUP_FONT_SIZE}],
     {ok,Font} = epx_font:match(FontSpec),
     {Wt,Ht} = epx_font:dimension(Font,TagText),
     XOffs = max(Wt+4,TagWidth),
+    H = Ht+2,
     W = 8*10,
     epxy:new(ID,
 	     [{type,text},
@@ -1929,22 +1981,6 @@ product_menu(ID,TagText,X,Y,TagWidth) ->
 	      {x,-XOffs},{y,0},
 	      {height,Ht}
 	     ]),
-    MenuFontSpec = [{name,"Arial"},{size,10}],
-    {ok,MenuFont} = epx_font:match(MenuFontSpec),
-    {Wt,Ht} = epx_font:dimension(Font,TagText),
-    H = Ht+2,
-    XOffs = max(Wt+4,TagWidth),
-    epxy:new(ID++".menu", 
-	     [{type,menu},
-	      {hidden,true},{disabled,true},
-	      {items,[Text||{Text,_ProductCode}<-product_menu()]},
-	      {font, MenuFont},
-	      {border,2},
-	      {border_color,black},
-	      {color, gray}, {fill, solid},
-	      {x,0}, {y,0}]),
-    epxy:add_callback(ID++".menu",menu,?MODULE), 
-
     {X+XOffs+W+2,Y+H,XOffs+W+2,H}.
 
 
@@ -2027,12 +2063,14 @@ sdo_rx(CobID,Bin,State) ->
 	?ma_ccs_initiate_download_request(N,E,S,_Index,_SubInd,Data) when 
 	      E =:= 1->
 	    _Value = sdo_value(S,N,Data),
-	    ?dbg("sdo_rx: CobID=~s, SET index=~w, si=~w, value=~w\n", 
-		 [integer_to_list(CobID,16), _Index,_SubInd,_Value]);
+	    ?dbg("sdo_rx: CobID=~s, SET index=16#~s, si=~w, value=~w\n", 
+		 [integer_to_list(CobID,16),
+		  integer_to_list(_Index,16),_SubInd,_Value]);
 
 	?ma_ccs_initiate_upload_request(_Index,_SubInd) ->
-	    ?dbg("sdo_rx: CobID=~s, GET index=~w, si=~w\n", 
-		 [integer_to_list(CobID,16),_Index,_SubInd]);
+	    ?dbg("sdo_rx: CobID=~s, GET index=16#~s, si=~w\n", 
+		 [integer_to_list(CobID,16),
+		  integer_to_list(_Index,16),_SubInd]);
 
 	_ ->
 	    ?warn("sdo_rx: CobID=~s, only  expedited mode supported\n",
@@ -2079,8 +2117,9 @@ send_pdo2_tx(CobId, Index, SubInd, Value) ->
 sdo_tx(CobId,Bin,State) ->  
     case Bin of
 	?ma_scs_initiate_download_response(Index,SubInd) ->
-	    ?dbg("sdo_tx: CobId=~s, SET RESP index=~w, si=~w\n",
-		 [integer_to_list(CobId,16),Index,SubInd]),
+	    ?dbg("sdo_tx: CobId=~s, SET RESP index=16#~s, si=~w\n",
+		 [integer_to_list(CobId,16),
+		  integer_to_list(Index,16),SubInd]),
 	    case State#state.sdo_request of
 		{Index,SubInd} ->
 		    %% SDO request ok
@@ -2092,14 +2131,17 @@ sdo_tx(CobId,Bin,State) ->
 	?ma_scs_initiate_upload_response(N,E,S,Index,SubInd,Data) when
 	      E =:= 1 ->
 	    Value = sdo_value(S,N,Data),
-	    ?dbg("sdo_tx: CobId=~s, GET RESP index=~w, si=~w, value=~w\n", 
-		 [integer_to_list(CobId,16),Index,SubInd,Value]),
+	    ?dbg("sdo_tx: CobId=~s, GET RESP index=16#~s, si=~w, value=~w\n", 
+		 [integer_to_list(CobId,16),
+		  integer_to_list(Index,16),SubInd,Value]),
 	    State1 = set_value_by_cobid(CobId,Index,SubInd,Value,State),
 	    {noreply,State1};
 
 	?ma_abort_transfer(Index,SubInd,Code) ->
-	    ?dbg("sdo_tx: CobId=~s, ABORT index=~w, si=~w, code=~w\n",
-		 [integer_to_list(CobId,16),Index,SubInd,Code]),
+	    ?dbg("sdo_tx: CobId=~s, ABORT index=~s, si=~w, code=~w\n",
+		 [integer_to_list(CobId,16),
+		  integer_to_list(Index,16),
+		  SubInd,Code]),
 	    case State#state.sdo_request of
 		{Index,SubInd} ->
 		    {noreply,State#state { sdo_request = undefined,
@@ -2187,9 +2229,6 @@ node_running(_CobId, Serial, State) ->
 	    {noreply, State};
 	{value,N,Ns} ->
 	    Now = erlang:system_time(micro_seconds),
-	    %% Node is present in node list
-	    %% XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
-	    %% send_pdo1_tx(0, ?MSG_REFRESH, 0, 0)
 	    {noreply, State#state { nodes=[N#{activity=>Now}|Ns] }}
     end.
 
@@ -2780,6 +2819,9 @@ find_by_pos(Pos, Maps) ->
 
 find_node_by_pos("nodes",Pos, Ns) ->  find_by_key(pos, Pos, Ns);
 find_node_by_pos(_Tab,_Pos,_Ns) -> false.
+
+find_uart_by_pos("uarts",Pos, Ns) ->  find_by_key(pos, Pos, Ns);
+find_uart_by_pos(_Tab,_Pos,_Ns) -> false.
 
 find_node_by_serial(Serial, Ns) -> find_by_key(serial, Serial, Ns).
 
