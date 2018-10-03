@@ -1382,6 +1382,7 @@ text(ID,X,Y,W,H,Opts) ->
 border(ID,W,H,_Opts) ->
     epxy:new(ID++".border",
 	     [{type,rectangle},
+	      {disabled, true},
 	      {color,black},{x,-1},{y,0},{width,W+2},{height,H+1}]).
 
 %% bridgeZone layout
@@ -2010,12 +2011,12 @@ product_menu(ID,TagText,X,Y,TagWidth) ->
 
 
 tagged_text(ID,TagText,X,Y,TagWidth) ->
-    tagged_text(ID,TagText,X,Y,TagWidth,false).
+    tagged_text(ID,TagText,X,Y,TagWidth,true,false).
 
 edit_text(ID,TagText,X,Y,TagWidth) ->
-    tagged_text(ID,TagText,X,Y,TagWidth,true).
+    tagged_text(ID,TagText,X,Y,TagWidth,false,true).
 
-tagged_text(ID,TagText,X,Y,TagWidth,Edit) ->
+tagged_text(ID,TagText,X,Y,TagWidth,Disabled,Edit) ->
     FontSpec = [{name,"Arial"},{slant,roman},{size,?GROUP_FONT_SIZE}],
     {ok,Font} = epx_font:match(FontSpec),
     {Wt,Ht} = epx_font:dimension(Font,TagText),
@@ -2026,6 +2027,7 @@ tagged_text(ID,TagText,X,Y,TagWidth,Edit) ->
 	     [{type,text},
 	      {font,Font},
 	      {edit,Edit},
+	      {disabled,Disabled},
 	      {font_color, black},
 	      {text,""},
 	      {color,white},{fill,solid},
@@ -2034,9 +2036,10 @@ tagged_text(ID,TagText,X,Y,TagWidth,Edit) ->
 	      {x,X+XOffs},{y,Y},
 	      {height,Ht}, {width,W}
 	     ]),
-    BorderColor = if Edit -> green; true -> black end,
+    BorderColor = if Edit -> blue; true -> black end,
     epxy:new(ID++".border",
 	     [{type,rectangle},
+	      {disabled, true},
 	      {color,BorderColor},
 	      {x,-1},{y,-1},
 	      {width,W+2},{height,H+2}]),
