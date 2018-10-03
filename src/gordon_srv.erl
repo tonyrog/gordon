@@ -161,11 +161,11 @@
 -define(PRODUCT_MK(P,V),     ((((P) bsl 16) band ?PRODUCT_ID_MASK) bor 
 				  ((V) band ?PRODUCT_VSN_MASK))).
 
--define(CN_CRC_DISABLED,     0x2BAD2BAD).
--define(CN_CRC_NONE,         0xFFFFFFFF).
--define(CN_APP_ZERO,         0x00000000).
--define(CN_APP_NONE,         0xFFFFFFFF).
--define(CN_APP_EMPTY,        0x2F5EBD7A). %% 0101111010111101011110101111010
+-define(CN_CRC_DISABLED,     16#2BAD2BAD).
+-define(CN_CRC_NONE,         16#FFFFFFFF).
+-define(CN_APP_ZERO,         16#00000000).
+-define(CN_APP_NONE,         16#FFFFFFFF).
+-define(CN_APP_EMPTY,        16#2F5EBD7A). %% 0101111010111101011110101111010
 
 -define(dbg(F,A), io:format((F),(A))).
 %% -define(dbg(F,A), ok).
