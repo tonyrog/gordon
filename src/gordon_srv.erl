@@ -161,6 +161,12 @@
 -define(PRODUCT_MK(P,V),     ((((P) bsl 16) band ?PRODUCT_ID_MASK) bor 
 				  ((V) band ?PRODUCT_VSN_MASK))).
 
+-define(CN_CRC_DISABLED,     0x2BAD2BAD).
+-define(CN_CRC_NONE,         0xFFFFFFFF).
+-define(CN_APP_ZERO,         0x00000000).
+-define(CN_APP_NONE,         0xFFFFFFFF).
+-define(CN_APP_EMPTY,        0x2F5EBD7A). %% 0101111010111101011110101111010
+
 -define(dbg(F,A), io:format((F),(A))).
 %% -define(dbg(F,A), ok).
 -define(warn(F,A), io:format((F),(A))).
@@ -296,7 +302,7 @@ handle_cast(_Msg, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_info(Frame, State) when is_record(Frame,can_frame) ->
-    ?dbg("Frame = ~p\n", [Frame]),
+    %% ?dbg("Frame = ~p\n", [Frame]),
     CanID = Frame#can_frame.id,
     CobID = ?CANID_TO_COBID(CanID),
     {Func,_ID} = if ?is_can_id_eff(CanID) ->
@@ -309,16 +315,15 @@ handle_info(Frame, State) when is_record(Frame,can_frame) ->
 	?SDO_TX   -> sdo_tx(CobID, Frame#can_frame.data,State);
 	?SDO_RX   -> sdo_rx(CobID, Frame#can_frame.data,State);
 	_ ->
-	    ?dbg("Frame = ~p\n", [Frame]),
 	    {noreply, State}
     end;
     
-handle_info({event,"screen",[{closed,true}]}, State) ->
+handle_info({event,"screen",#{closed:=true}}, State) ->
     %% fixme: try to terminate gracefully
     {stop, normal, State};
 
 %% handle select in node list
-handle_info({select,"nodes.r"++RTxt,[{press,1},{x,_X},{y,_Y}|_]},State) ->
+handle_info({select,"nodes.r"++RTxt,#{press:=1}},State) ->
     Pos = list_to_integer(RTxt),
     State1 = deselect_row(State#state.selected_tab,
 			  State#state.selected_pos,State),
@@ -352,7 +357,7 @@ handle_info({select,"nodes.r"++RTxt,[{press,1},{x,_X},{y,_Y}|_]},State) ->
 	    {noreply, State3}
     end;
 %% handle select in uart list
-handle_info({select,"uarts.r"++RTxt,[{press,1},{x,_X},{y,_Y}|_]},State) ->
+handle_info({select,"uarts.r"++RTxt,#{press:=1}},State) ->
     Pos = list_to_integer(RTxt),
     State1 = deselect_row(State#state.selected_tab,
 			  State#state.selected_pos,State),
@@ -374,26 +379,36 @@ handle_info({select,"uarts.r"++RTxt,[{press,1},{x,_X},{y,_Y}|_]},State) ->
 	_ ->
 	    {noreply, State1}
     end;
-handle_info({select,"ubt.product",
-	     [{press,1},{x,_},{y,_},{xy,{Gx,Gy}}|_]},State) ->
-    epxy:set("Product_menu", [{x,Gx},{y,Gy},{hidden,false},{disabled,false}]),
+handle_info({select,"ubt.product", #{press:=1,xy:=Pos}},State) ->
+    popup("z_product_menu", Pos),
     {noreply,State};
-handle_info({select,"ubt.product",[{press,0},{x,_},{y,_}|_]},State) ->
-    epxy:set("Product_menu", [{hidden,true},{disabled,false}]),
+handle_info({select,"ubt.product",#{press:=0}},State) ->
+    popdown("z_product_menu"),
     {noreply,State};
-handle_info({menu,"Product_menu",[{value,I}|_]}, State) ->
+handle_info({menu,"z_product_menu",#{value:=I}}, State) ->
     case product(I) of
-	false -> {noreply,State};
-	Product ->
-	    XCobId = State#state.selected_eff,
-	    co_sdo_cli:send_sdo_set(XCobId,?INDEX_BOOT_PRODUCT, 0, Product),
-	    {noreply,State}
+	false -> 
+	    {noreply,State};
+	Value ->
+	    case State#state.selected_eff of
+		undefined ->
+		    {noreply,State};
+		CobId ->
+		    co_sdo_cli:send_sdo_set(CobId,?INDEX_BOOT_PRODUCT,
+					    0,Value),
+		    epxy:set("ubt.product", [{text,format_product(Value)}]),
+		    Major = (Value bsr 8) band 16#ff,
+		    Minor = Value band 16#ff,
+		    State1 = set_by_cobid(CobId,vsn,{Major,Minor},State),
+		    State2 = set_by_cobid(CobId,product,Value,State1),
+		    {noreply, State2}
+	    end
     end;
-handle_info({select,_ID,[{press,0},{x,_},{y,_}|_]},State) ->
+handle_info({select,_ID,#{press:=0}},State) ->
     %% ignore mouse release in node selection
     {noreply, State};
 
-handle_info({switch,ID,[{value,Value}|_]},State) ->
+handle_info({switch,ID,#{value:=Value}},State) ->
     {SID,Si} = 
 	case ID of
 	    "pdb.pout.e1.onoff" -> {"pdb",1};
@@ -441,7 +456,7 @@ handle_info({switch,ID,[{value,Value}|_]},State) ->
     {noreply, State};
 
 %% send a reset and set hold mode
-handle_info({button,[_,_,_|".hold"],[{value,1}|_]},State) ->
+handle_info({button,[_,_,_|".hold"],#{value:=1}},State) ->
     case find_node_by_pos(State#state.selected_tab,
 			  State#state.selected_pos,
 			  State#state.nodes) of
@@ -454,7 +469,7 @@ handle_info({button,[_,_,_|".hold"],[{value,1}|_]},State) ->
     end;
 
 %% leave boot mode
-handle_info({button,[_,_,_|".go"],[{value,1}|_]},State) ->
+handle_info({button,[_,_,_|".go"],#{value:=1}},State) ->
     WDT = 1,
     {noreply,action_sdo(State,boot,?INDEX_UBOOT_GO,0,WDT)};
 %%
@@ -464,7 +479,7 @@ handle_info({button,[_,_,_|".go"],[{value,1}|_]},State) ->
 %% start process disable all input (except flash dialog)
 %% show progress remove flash dialog and enable input
 %%
-handle_info({button,[_,_,_|".upgrade"],[{value,1}|_]},State) ->
+handle_info({button,[_,_,_|".upgrade"],#{value:=1}},State) ->
     case find_node_by_pos(State#state.selected_tab,
 			  State#state.selected_pos,
 			  State#state.nodes) of
@@ -481,7 +496,7 @@ handle_info({button,[_,_,_|".upgrade"],[{value,1}|_]},State) ->
     end;
 
 %% reset the node
-handle_info({button,[_,_,_|".reset"],[{value,1}|_]},State) ->
+handle_info({button,[_,_,_|".reset"],#{value:=1}},State) ->
     %% send a reset and set hold mode
     case find_node_by_pos(State#state.selected_tab,
 			  State#state.selected_pos,
@@ -494,7 +509,7 @@ handle_info({button,[_,_,_|".reset"],[{value,1}|_]},State) ->
 	    {noreply,State#state{hold_mode = false }}
     end;
 
-handle_info({button,[_,_,_|".setup"],[{value,1}|_]},State) ->
+handle_info({button,[_,_,_|".setup"],#{value:=1}},State) ->
     case find_node_by_pos(State#state.selected_tab,
 			  State#state.selected_pos,
 			  State#state.nodes) of
@@ -504,12 +519,12 @@ handle_info({button,[_,_,_|".setup"],[{value,1}|_]},State) ->
 	    Status = maps:get(status,Node,undefined),
 	    Serial = maps:get(serial,Node,0),
 	    if Status =:= up ->
-		    XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
+		    CobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
 		    case selected_id(State) of
-			"pdb" -> bridgeZone_setup(XCobId,State);
-			"pds" -> powerZone_setup(XCobId,State);
-			"pdi" -> ioZone_setup(XCobId,State);
-			"pdc" -> controlZone_setup(XCobId,State);
+			"pdb" -> bridgeZone_setup(CobId,State);
+			"pds" -> powerZone_setup(CobId,State);
+			"pdi" -> ioZone_setup(CobId,State);
+			"pdc" -> controlZone_setup(CobId,State);
 			_ -> {noreply,State}
 		    end;
 	       true ->
@@ -517,16 +532,16 @@ handle_info({button,[_,_,_|".setup"],[{value,1}|_]},State) ->
 	    end
     end;
 
-handle_info({button,[_,_,_|".factory"],[{value,1}|_]},State) ->
+handle_info({button,[_,_,_|".factory"],#{value:=1}},State) ->
     {noreply,action_sdo(State,up,?IX_RESTORE_DEFAULT_PARAMETERS,4,<<"daol">>)};
 
-handle_info({button,[_,_,_|".save"],[{value,1}|_]},State) ->
+handle_info({button,[_,_,_|".save"],#{value:=1}},State) ->
     {noreply,action_sdo(State,up,?IX_STORE_PARAMETERS,1,<<"evas">>)};
 
-handle_info({button,[_,_,_|".restore"],[{value,1}|_]},State) ->
+handle_info({button,[_,_,_|".restore"],#{value:=1}},State) ->
     {noreply, action_sdo(State,up,?IX_RESTORE_DEFAULT_PARAMETERS,1,<<"daol">>)};
 
-handle_info({button,"uart.lpc_open",[{value,1}|_]},State) ->
+handle_info({button,"uart.lpc_open",#{value:=1}},State) ->
     if State#state.uart =:= undefined, is_list(State#state.elpc) ->
 	    %% fixme open using correct device if multiple!
 	    Elpc = State#state.elpc,
@@ -583,7 +598,7 @@ handle_info({button,"uart.lpc_open",[{value,1}|_]},State) ->
 	    {noreply, State#state { dev_info = [], dev_type = undefined }}
     end;
 
-handle_info({button,"uart.lpc_flash",[{value,1}|_]},State) ->
+handle_info({button,"uart.lpc_flash",#{value:=1}},State) ->
     case lists:keyfind(ihex,1,State#state.firmware) of
 	{ihex,Firmware} when State#state.uart =/= undefined ->
 	    case elpcisp:unlock(State#state.uart) of
@@ -609,7 +624,7 @@ handle_info({button,"uart.lpc_flash",[{value,1}|_]},State) ->
 	    {noreply, State}
     end;
 
-handle_info({button,"uart.lpc_go",[{value,1}|_]},State) ->
+handle_info({button,"uart.lpc_go",#{value:=1}},State) ->
     if State#state.uart =:= undefined ->
 	    {noreply, State};
        true ->
@@ -619,7 +634,7 @@ handle_info({button,"uart.lpc_go",[{value,1}|_]},State) ->
 	    end,
 	    {noreply, State}
     end;
-handle_info({button,"uart.lpc_reset",[{value,1}|_]},State) ->
+handle_info({button,"uart.lpc_reset",#{value:=1}},State) ->
     if State#state.uart =:= undefined ->
 	    {noreply, State};
        true ->
@@ -629,11 +644,11 @@ handle_info({button,"uart.lpc_reset",[{value,1}|_]},State) ->
 	    end,
 	    {noreply, State}
     end;
-handle_info({button,_ID,[{value,0}|_]},State) ->
+handle_info({button,_ID,#{value:=0}},State) ->
     %% ignore button release
     {noreply,State};
 
-handle_info({analog,ID,[{value,Value}|_]},State) ->
+handle_info({analog,ID,#{value:=Value}},State) ->
     Si = case ID of
 	     "pdb.aout.e5" -> 5;
 	     "pdb.aout.e6" -> 6;
@@ -731,7 +746,7 @@ product(I) ->
     try lists:nth(I, product_menu()) of
 	{_Text, Code} -> Code
     catch
-	error:_ -> 0
+	error:_ -> false
     end.
 
 set_elpc_row(undefined) ->
@@ -847,14 +862,12 @@ refresh_node_state(SID, Node, State) ->
 	boot ->
 	    Serial = maps:get(serial,Node,0),
 	    epxy:set(SID++".serial", [{text,format_value(serial,Serial)}]), 
-	    %% fixme: menu
 	    Product = maps:get(product, Node, 0),
-	    epxy:set(SID++".product", [{text,format_hex32(Product)}]),
+	    epxy:set(SID++".product", [{text,format_product(Product)}]),
 	    Creation = maps:get(creation, Node, 0),
 	    epxy:set(SID++".creation", [{text,format_date(Creation)}]),
 	    AppAddr = maps:get(app_addr,Node,0),
 	    epxy:set(SID++".addr", [{text,format_value(app_addr,AppAddr)}]),
-	    %% 
 	    enable_buttons(SID,["reset","go"]),
 	    case UAppMatch of
 		false ->
@@ -872,12 +885,12 @@ refresh_node_state(SID, Node, State) ->
 refresh_uart_state(State) ->
     case find_uart_by_pos(State#state.selected_tab,
 			  State#state.selected_pos,
-			  State#state.nodes) of
+			  State#state.uarts) of
 	false -> State;
 	Uart -> refresh_uart_state(selected_id(State),Uart,State)
     end.
 
-refresh_uart_state(SID, Uart, State) ->
+refresh_uart_state(SID, _Uart, State) ->
     if State#state.uart =:= undefined ->
 	    enable_buttons(SID,["lpc_open", "lpc_reset"]),
 	    disable_buttons(SID, ["lpc_go", "lpc_flash"]);
@@ -887,13 +900,17 @@ refresh_uart_state(SID, Uart, State) ->
     end,
     State.
 
-disable_buttons(PDx, Bs) ->
-    [epxy:set(PDx++"."++B, [{font_color,white},{disabled,true}]) ||
-	B <- Bs].
+disable_buttons(ID, Bs) ->
+    [begin 
+	 ?dbg("disable button ~s\n", [ID++"."++B]),
+	 epxy:set(ID++"."++B, [{font_color,white},{disabled,true}]) 
+     end || B <- Bs].
 
-enable_buttons(PDx, Bs) ->
-    [epxy:set(PDx++"."++B, [{font_color,black},{disabled,false}]) ||
-	B <- Bs].
+enable_buttons(ID, Bs) ->
+    [begin
+	 ?dbg("enable button ~s\n", [ID++"."++B]),
+	 epxy:set(ID++"."++B, [{font_color,black},{disabled,false}])
+     end || B <- Bs].
 
 match_uapp_firmware(Node, State) ->
     Prod = (maps:get(product,Node,0) bsr 16) band 16#ff,
@@ -943,8 +960,8 @@ action_sdo(State, Status, Index, Si, Value) ->
 	    CurrentStatus = maps:get(status,Node,undefined),
 	    Serial = maps:get(serial,Node,0),
 	    if CurrentStatus =:= Status ->
-		    XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
-		    co_sdo_cli:send_sdo_set(XCobId, Index, Si, Value),
+		    CobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
+		    co_sdo_cli:send_sdo_set(CobId, Index, Si, Value),
 		    State#state { sdo_request = { Index, Si }};
 	       true ->
 		    State
@@ -1034,7 +1051,7 @@ event(Signal,ID,Env) ->
     ?SERVER ! {Signal,ID,Env}.
 
 %% Filter callback
-event_filter(filter,Event,Widget,Window,XY,dec) ->
+event_filter(filter,Event,_Widget,_Window,_XY,dec) ->
     Valid = [$\r,$\e,$\t,$\b,$0,$1,$2,$3,$4,$5,$5,$6,$7,$8,$9],
     case Event of
 	{key_press,Sym,_Mode,_Code} ->
@@ -1044,7 +1061,7 @@ event_filter(filter,Event,Widget,Window,XY,dec) ->
 	_ ->
 	    true
     end;
-event_filter(filter,Event,Widget,Window,XY,hex) ->
+event_filter(filter,Event,_Widget,_Window,_XY,hex) ->
     Valid = [$\r,$\e,$\t,$\b,$0,$1,$2,$3,$4,$5,$5,$6,$7,$8,$9,
 	     $a,$b,$c,$d,$e,$f,$A,$B,$C,$D,$E,$F],
     case Event of
@@ -1936,10 +1953,12 @@ group_rectangle(ID,Text,X,Y,W,H,Status) ->
 	      {height,10}  %% width,25
 	     ]).
 
+%% global pop menus
+
 product_popup_menu() ->
     MenuFontSpec = [{name,"Arial"},{size,10}],
     {ok,MenuFont} = epx_font:match(MenuFontSpec),
-    epxy:new("Product_menu", 
+    epxy:new("z_product_menu", 
 	     [{type,menu},
 	      {hidden,true},{disabled,true},
 	      {items,[Text||{Text,_ProductCode}<-product_menu()]},
@@ -1948,7 +1967,13 @@ product_popup_menu() ->
 	      {border_color,black},
 	      {color, gray}, {fill, solid},
 	      {x,0}, {y,0}]),
-    epxy:add_callback("product_menu",menu,?MODULE).
+    epxy:add_callback("z_product_menu",menu,?MODULE).
+
+popup(ID, {X,Y}) ->
+    epxy:set(ID, [{x,X},{y,Y},{state,active},{hidden,false},{disabled,false}]).
+
+popdown(ID) ->
+    epxy:set(ID, [{hidden,true},{disabled,true}]).
 
 %% Tagged text
 product_menu(ID,TagText,X,Y,TagWidth) ->
@@ -2174,9 +2199,9 @@ node_booted(_CobID, Serial, State) ->
     State1 = State#state { nodes=Nodes },
     State3 = 
 	if State1#state.hold_mode ->
-		XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
+		CobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
 		WDT = 0,
-		co_sdo_cli:send_sdo_set(XCobId, ?INDEX_UBOOT_HOLD, 0, WDT),
+		co_sdo_cli:send_sdo_set(CobId, ?INDEX_UBOOT_HOLD, 0, WDT),
 		State2 = State1#state { sdo_request={?INDEX_UBOOT_HOLD, 0},
 					hold_mode=false },
 		refresh_node_state(State2);
@@ -2195,32 +2220,32 @@ node_started(_CobId, Serial, State) ->
     show_if_selected(Serial,State1),
     spawn(
       fun() ->
-	      XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
-	      ?dbg("XCobId = ~8.16.0B\n", [XCobId]),
-	      co_sdo_cli:send_sdo_get(XCobId, ?INDEX_ID, 0),
-	      co_sdo_cli:send_sdo_get(XCobId, ?IX_IDENTITY_OBJECT, ?SI_IDENTITY_PRODUCT)
+	      CobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
+	      ?dbg("CobId = ~8.16.0B\n", [CobId]),
+	      co_sdo_cli:send_sdo_get(CobId, ?INDEX_ID, 0),
+	      co_sdo_cli:send_sdo_get(CobId, ?IX_IDENTITY_OBJECT, ?SI_IDENTITY_PRODUCT)
 	      %% ...
       end),
     State2 = refresh_node_state(State1),
     {noreply,State2}.
 
 node_running(_CobId, Serial, State) ->
-    ?dbg("Node ~6.16.0B running\n", [Serial]),
+    %% ?dbg("Node ~6.16.0B running\n", [Serial]),
     case take_node_by_serial(Serial, State#state.nodes) of
 	false ->
 	    spawn(
 	      fun() ->
-		      XCobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
-		      ?dbg("XCobId = ~8.16.0B\n", [XCobId]),
-		      co_sdo_cli:send_sdo_get(XCobId, ?INDEX_ID, 0),
-		      co_sdo_cli:send_sdo_get(XCobId, ?IX_IDENTITY_OBJECT,
+		      CobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
+		      ?dbg("CobId = ~8.16.0B\n", [CobId]),
+		      co_sdo_cli:send_sdo_get(CobId, ?INDEX_ID, 0),
+		      co_sdo_cli:send_sdo_get(CobId, ?IX_IDENTITY_OBJECT,
 					      ?SI_IDENTITY_PRODUCT),
-		      co_sdo_cli:send_sdo_get(XCobId, ?IX_IDENTITY_OBJECT,
+		      co_sdo_cli:send_sdo_get(CobId, ?IX_IDENTITY_OBJECT,
 					      ?SI_IDENTITY_REVISION),
-		      co_sdo_cli:send_sdo_get(XCobId, ?INDEX_BOOT_APP_VSN, 0),
-		      co_sdo_cli:send_sdo_get(XCobId, ?INDEX_BOOT_APP_ADDR, 0),
-		      co_sdo_cli:send_sdo_get(XCobId, ?INDEX_BOOT_VSN, 0),
-		      if XCobId =:= State#state.selected_eff ->
+		      co_sdo_cli:send_sdo_get(CobId, ?INDEX_BOOT_APP_VSN, 0),
+		      co_sdo_cli:send_sdo_get(CobId, ?INDEX_BOOT_APP_ADDR, 0),
+		      co_sdo_cli:send_sdo_get(CobId, ?INDEX_BOOT_VSN, 0),
+		      if CobId =:= State#state.selected_eff ->
 			      send_pdo1_tx(0, ?MSG_REFRESH, 0, 0);
 			 true ->
 			      ok
@@ -2259,8 +2284,8 @@ node_data(Index, Si, Value, State) ->
 		 [SID,Si,Value]),
 	    case SID of
 		"pds" ->
-		    _Loc = (Value bsr 16) band 16#ff,
-		    _OutLoc = (Value bsr 8) band 16#ff,
+		    %% _Loc = (Value bsr 16) band 16#ff,
+		    %% _OutLoc = (Value bsr 8) band 16#ff,
 		    Cause = case Value band 16#ff of
 				?ALARM_CAUSE_OK    -> "";
 				?ALARM_CAUSE_FUSE  -> "Fuse";
@@ -2768,9 +2793,9 @@ format_value(product, Product) when is_integer(Product) ->
     end;
 format_value(app_vsn,Value) when is_integer(Value) ->
     case Value of
-	16#00000000 -> "zero";
-	16#2F5EBD7A -> "empty";
-	16#FFFFFFFF -> "none";
+	?CN_APP_ZERO  -> "zero";
+	?CN_APP_EMPTY -> "empty";
+	?CN_APP_NONE  -> "none";
 	_ -> format_date(Value)
     end;
 format_value(_Key,Int) when is_integer(Int) -> integer_to_list(Int);
