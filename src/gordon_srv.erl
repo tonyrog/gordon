@@ -167,8 +167,8 @@
 -define(CN_APP_NONE,         16#FFFFFFFF).
 -define(CN_APP_EMPTY,        16#2F5EBD7A). %% 0101111010111101011110101111010
 
--define(dbg(F,A), io:format((F),(A))).
-%% -define(dbg(F,A), ok).
+%%-define(dbg(F,A), io:format((F),(A))).
+-define(dbg(F,A), ok).
 -define(warn(F,A), io:format((F),(A))).
 -define(error(F,A), io:format((F),(A))).
 
@@ -217,8 +217,6 @@ init(Options) ->
     {_X1,Y1,RH1} = node_table(XOffs,YOffs,Width div 2, Height),
     {_X2,_Y2,_RH2} = uart_table(XOffs,Y1+2*YOffs,Width div 2, Height),
 
-    product_popup_menu(),
-
     %% define various layouts
     X = Width div 2,
     Y = 10,
@@ -228,6 +226,7 @@ init(Options) ->
     bridgeZone(X,Y,W,H),
     ioZone(X,Y,W,H),
     powerZone(X,Y,W,H),
+    controlZone(X,Y,W,H),
     uBoot(X,Y,W,H),
     uartBoot(X,Y,W,H),
 
@@ -242,8 +241,6 @@ init(Options) ->
     UARTS = set_elpc_row(Elpc),
 
     EchoTimer = erlang:start_timer(?ECHO_INTERVAL, self(), echo_timeout),
-
-    
 
     {ok, #state{ echo_timer = EchoTimer, row_height = RH1, firmware = Firmware, 
 		 nodes = [], uarts = UARTS, elpc = Elpc }}.
@@ -379,13 +376,7 @@ handle_info({select,"uarts.r"++RTxt,#{press:=1}},State) ->
 	_ ->
 	    {noreply, State1}
     end;
-handle_info({select,"ubt.product", #{press:=1,xy:=Pos}},State) ->
-    popup("z_product_menu", Pos),
-    {noreply,State};
-handle_info({select,"ubt.product",#{press:=0}},State) ->
-    popdown("z_product_menu"),
-    {noreply,State};
-handle_info({menu,"z_product_menu",#{value:=I}}, State) ->
+handle_info({menu,"ubt.product",#{value:=I}}, State) ->
     case product(I) of
 	false -> 
 	    {noreply,State};
@@ -749,6 +740,19 @@ product(I) ->
 	error:_ -> false
     end.
 
+product_by_value(Value) ->
+    keyindex(Value, 2, product_menu()).
+
+keyindex(Value, KeyPos, TupleList) ->
+    keyindex_(Value, KeyPos, TupleList, 1).
+
+keyindex_(Value, KeyPos, [T|_], I) when element(KeyPos,T) =:= Value ->
+    I;
+keyindex_(Value, KeyPos, [_|Ts], I) ->
+    keyindex_(Value, KeyPos, Ts, I+1);
+keyindex_(_Value, _KeyPos, [], _I) ->
+    0.
+
 set_elpc_row(undefined) ->
     [];
 set_elpc_row(Elpc) ->
@@ -861,9 +865,15 @@ refresh_node_state(SID, Node, State) ->
 	    State;
 	boot ->
 	    Serial = maps:get(serial,Node,0),
-	    epxy:set(SID++".serial", [{text,format_value(serial,Serial)}]), 
+	    epxy:set(SID++".serial", [{text,format_value(serial,Serial)}]),
 	    Product = maps:get(product, Node, 0),
-	    epxy:set(SID++".product", [{text,format_product(Product)}]),
+	    case SID of
+		"ubt" ->
+		    I = product_by_value(Product),
+		    epxy:set(SID++".product", [{value,I}]);
+		_ ->
+		    epxy:set(SID++".product", [{text,format_product(Product)}])
+	    end,
 	    Creation = maps:get(creation, Node, 0),
 	    epxy:set(SID++".creation", [{text,format_date(Creation)}]),
 	    AppAddr = maps:get(app_addr,Node,0),
@@ -1484,6 +1494,28 @@ powerZone(X,Y,_W,_H) ->
 
     ok.
 
+controlZone(X,Y,_W,_H) ->
+    XGap = ?TOP_XGAP,
+    YGap = ?GROUP_FONT_SIZE,
+    Y0 = YGap,
+    X1 = XGap,
+    %% X2 = X1+64,
+    ID = "pdc",
+
+    {X11,Yn,_W0,H0} = tagged_text("pdc.app_vsn", "Version", X1, Y0, 0),
+    {X12,_,_W01,_H01} = tagged_text("pdc.uapp_vsn", "Upgrade", X11+XGap, Y0, 0),
+    W1 = X12,
+    Y1 = Yn,
+
+    {W2,H2} = add_buttons(ID, X1, Y1+YGap),
+
+    Wt = XGap+max(W1,W2)+XGap,
+    Ht = YGap+H0+H2+2*YGap,
+
+    group_rectangle(ID,"controlZone",X,Y,Wt,Ht,all),
+
+    ok.
+
 %%
 %% uBoot mode dialog
 %% Buttons 
@@ -1954,30 +1986,10 @@ group_rectangle(ID,Text,X,Y,W,H,Status) ->
 	      {height,10}  %% width,25
 	     ]).
 
-%% global pop menus
-
-product_popup_menu() ->
-    MenuFontSpec = [{name,"Arial"},{size,10}],
-    {ok,MenuFont} = epx_font:match(MenuFontSpec),
-    epxy:new("z_product_menu", 
-	     [{type,menu},
-	      {hidden,true},{disabled,true},
-	      {items,[Text||{Text,_ProductCode}<-product_menu()]},
-	      {font, MenuFont},
-	      {border,2},
-	      {border_color,black},
-	      {color, gray}, {fill, solid},
-	      {x,0}, {y,0}]),
-    epxy:add_callback("z_product_menu",menu,?MODULE).
-
-popup(ID, {X,Y}) ->
-    epxy:set(ID, [{x,X},{y,Y},{state,active},{hidden,false},{disabled,false}]).
-
-popdown(ID) ->
-    epxy:set(ID, [{hidden,true},{disabled,true}]).
-
 %% Tagged text
 product_menu(ID,TagText,X,Y,TagWidth) ->
+    MenuFontSpec = [{name,"Arial"},{size,10}],
+    {ok,MenuFont} = epx_font:match(MenuFontSpec),
     FontSpec = [{name,"Arial"},{slant,roman},{size,?GROUP_FONT_SIZE}],
     {ok,Font} = epx_font:match(FontSpec),
     {Wt,Ht} = epx_font:dimension(Font,TagText),
@@ -1985,17 +1997,14 @@ product_menu(ID,TagText,X,Y,TagWidth) ->
     H = Ht+2,
     W = 8*10,
     epxy:new(ID,
-	     [{type,text},
-	      {font,Font},
-	      {font_color, black},
-	      {text,""},
-	      {color,white},{fill,solid},
-	      {valign,center},
-	      {halign,left},
-	      {x,X+XOffs},{y,Y},
-	      {height,Ht}, {width,W}
-	     ]),
-    epxy:add_callback(ID,select,?MODULE), 
+	     [{type,menu},
+	      {items,[Text||{Text,_ProductCode}<-product_menu()]},
+	      {font, MenuFont},
+	      {border,2},
+	      {border_color,black},
+	      {color, gray}, {fill, solid},
+	      {x,X+XOffs}, {y,Y}]),
+    epxy:add_callback(ID,menu,?MODULE),
     epxy:new(ID++".tag",
 	     [{type,text},
 	      {font,Font},
@@ -2008,7 +2017,6 @@ product_menu(ID,TagText,X,Y,TagWidth) ->
 	      {height,Ht}
 	     ]),
     {X+XOffs+W+2,Y+H,XOffs+W+2,H}.
-
 
 tagged_text(ID,TagText,X,Y,TagWidth) ->
     tagged_text(ID,TagText,X,Y,TagWidth,true,false).
