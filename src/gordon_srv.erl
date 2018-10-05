@@ -95,7 +95,7 @@
 -define(GROUP_FONT_SIZE, 12).
 -define(SLIDER_WIDTH,  100).
 -define(SLIDER_HEIGHT, 8).
--define(BUTTON_WIDTH, 72).
+-define(BUTTON_WIDTH, 84).
 -define(BUTTON_HEIGHT, 18).
 -define(BUTTON_ROUND_WH, 4).
 -define(TOP_XGAP, 12).
@@ -217,6 +217,20 @@ init(Options) ->
     {_X1,Y1,RH1} = node_table(XOffs,YOffs,Width div 2, Height),
     {_X2,_Y2,_RH2} = uart_table(XOffs,Y1+2*YOffs,Width div 2, Height),
 
+    epxy:new("qwerty", [{type,user},{user,{gordon_keyboard,alpha,[]}},
+			{hidden, true}, {disabled, true}, {last, true},
+			{border,2}, {border_color, green}
+		       ]),
+    [{width,Qw},{height,Qh}] = epxy:get("qwerty", [width,height]),
+    epxy:set("qwerty", [{x,(800-Qw) div 2}, {y,(480-Qh)}]),
+
+    epxy:new("numeric", [{type,user},{user,{gordon_keyboard,numeric,[]}},
+			 {hidden, true}, {disabled, true}, {last, true},
+			 {border,2}, {border_color, blue}
+			]),
+    [{width,Nw},{height,Nh}] = epxy:get("numeric", [width,height]),
+    epxy:set("numeric", [{x,(800-Nw) div 2}, {y,(480-Nh)}]),
+
     %% define various layouts
     X = Width div 2,
     Y = 10,
@@ -315,12 +329,12 @@ handle_info(Frame, State) when is_record(Frame,can_frame) ->
 	    {noreply, State}
     end;
     
-handle_info({event,"screen",#{closed:=true}}, State) ->
+handle_info({event,"screen",#{event:=closed}}, State) ->
     %% fixme: try to terminate gracefully
     {stop, normal, State};
 
 %% handle select in node list
-handle_info({select,"nodes.r"++RTxt,#{press:=1}},State) ->
+handle_info({select,"nodes.r"++RTxt,#{event:=button_press}},State) ->
     Pos = list_to_integer(RTxt),
     State1 = deselect_row(State#state.selected_tab,
 			  State#state.selected_pos,State),
@@ -354,7 +368,7 @@ handle_info({select,"nodes.r"++RTxt,#{press:=1}},State) ->
 	    {noreply, State3}
     end;
 %% handle select in uart list
-handle_info({select,"uarts.r"++RTxt,#{press:=1}},State) ->
+handle_info({select,"uarts.r"++RTxt,#{event:=button_press}},State) ->
     Pos = list_to_integer(RTxt),
     State1 = deselect_row(State#state.selected_tab,
 			  State#state.selected_pos,State),
@@ -376,7 +390,7 @@ handle_info({select,"uarts.r"++RTxt,#{press:=1}},State) ->
 	_ ->
 	    {noreply, State1}
     end;
-handle_info({menu,"ubt.product",#{value:=I}}, State) ->
+handle_info({menu,"ubt.product",#{event:=changed,value:=I}}, State) ->
     case product(I) of
 	false -> 
 	    {noreply,State};
@@ -395,11 +409,20 @@ handle_info({menu,"ubt.product",#{value:=I}}, State) ->
 		    {noreply, State2}
 	    end
     end;
-handle_info({select,_ID,#{press:=0}},State) ->
+handle_info({numeric_item,_ID,#{event:=focus_in}},State) ->
+    %% show numeric keyboard if requested
+    epxy:set("numeric", [{hidden,false}, {disabled,false}]),
+    {noreply, State};
+handle_info({numeric_item,_ID,#{event:=focus_out}},State) ->
+    %% show numeric keyboard if requested
+    epxy:set("numeric", [{hidden,true}, {disabled,true}]),
+    {noreply, State};    
+
+handle_info({select,_ID,#{event:=button_release}},State) ->
     %% ignore mouse release in node selection
     {noreply, State};
 
-handle_info({switch,ID,#{value:=Value}},State) ->
+handle_info({switch,ID,#{event:=changed,value:=Value}},State) ->
     {SID,Si} = 
 	case ID of
 	    "pdb.pout.e1.onoff" -> {"pdb",1};
@@ -447,7 +470,7 @@ handle_info({switch,ID,#{value:=Value}},State) ->
     {noreply, State};
 
 %% send a reset and set hold mode
-handle_info({button,[_,_,_|".hold"],#{value:=1}},State) ->
+handle_info({button,[_,_,_|".hold"],#{event:=button_press}},State) ->
     case find_node_by_pos(State#state.selected_tab,
 			  State#state.selected_pos,
 			  State#state.nodes) of
@@ -460,7 +483,7 @@ handle_info({button,[_,_,_|".hold"],#{value:=1}},State) ->
     end;
 
 %% leave boot mode
-handle_info({button,[_,_,_|".go"],#{value:=1}},State) ->
+handle_info({button,[_,_,_|".go"],#{event:=button_press}},State) ->
     WDT = 1,
     {noreply,action_sdo(State,boot,?INDEX_UBOOT_GO,0,WDT)};
 %%
@@ -470,7 +493,7 @@ handle_info({button,[_,_,_|".go"],#{value:=1}},State) ->
 %% start process disable all input (except flash dialog)
 %% show progress remove flash dialog and enable input
 %%
-handle_info({button,[_,_,_|".upgrade"],#{value:=1}},State) ->
+handle_info({button,[_,_,_|".upgrade"],#{event:=button_press}},State) ->
     case find_node_by_pos(State#state.selected_tab,
 			  State#state.selected_pos,
 			  State#state.nodes) of
@@ -487,7 +510,7 @@ handle_info({button,[_,_,_|".upgrade"],#{value:=1}},State) ->
     end;
 
 %% reset the node
-handle_info({button,[_,_,_|".reset"],#{value:=1}},State) ->
+handle_info({button,[_,_,_|".reset"],#{event:=button_press}},State) ->
     %% send a reset and set hold mode
     case find_node_by_pos(State#state.selected_tab,
 			  State#state.selected_pos,
@@ -500,7 +523,7 @@ handle_info({button,[_,_,_|".reset"],#{value:=1}},State) ->
 	    {noreply,State#state{hold_mode = false }}
     end;
 
-handle_info({button,[_,_,_|".setup"],#{value:=1}},State) ->
+handle_info({button,[_,_,_|".setup"],#{event:=button_press}},State) ->
     case find_node_by_pos(State#state.selected_tab,
 			  State#state.selected_pos,
 			  State#state.nodes) of
@@ -523,16 +546,16 @@ handle_info({button,[_,_,_|".setup"],#{value:=1}},State) ->
 	    end
     end;
 
-handle_info({button,[_,_,_|".factory"],#{value:=1}},State) ->
+handle_info({button,[_,_,_|".factory"],#{event:=button_press}},State) ->
     {noreply,action_sdo(State,up,?IX_RESTORE_DEFAULT_PARAMETERS,4,<<"daol">>)};
 
-handle_info({button,[_,_,_|".save"],#{value:=1}},State) ->
+handle_info({button,[_,_,_|".save"],#{event:=button_press}},State) ->
     {noreply,action_sdo(State,up,?IX_STORE_PARAMETERS,1,<<"evas">>)};
 
-handle_info({button,[_,_,_|".restore"],#{value:=1}},State) ->
+handle_info({button,[_,_,_|".restore"],#{event:=button_press}},State) ->
     {noreply, action_sdo(State,up,?IX_RESTORE_DEFAULT_PARAMETERS,1,<<"daol">>)};
 
-handle_info({button,"uart.lpc_open",#{value:=1}},State) ->
+handle_info({button,"uart.lpc_open",#{event:=button_press}},State) ->
     if State#state.uart =:= undefined, is_list(State#state.elpc) ->
 	    %% fixme open using correct device if multiple!
 	    Elpc = State#state.elpc,
@@ -589,7 +612,7 @@ handle_info({button,"uart.lpc_open",#{value:=1}},State) ->
 	    {noreply, State#state { dev_info = [], dev_type = undefined }}
     end;
 
-handle_info({button,"uart.lpc_flash",#{value:=1}},State) ->
+handle_info({button,"uart.lpc_flash",#{event:=button_press}},State) ->
     case lists:keyfind(ihex,1,State#state.firmware) of
 	{ihex,Firmware} when State#state.uart =/= undefined ->
 	    case elpcisp:unlock(State#state.uart) of
@@ -615,7 +638,7 @@ handle_info({button,"uart.lpc_flash",#{value:=1}},State) ->
 	    {noreply, State}
     end;
 
-handle_info({button,"uart.lpc_go",#{value:=1}},State) ->
+handle_info({button,"uart.lpc_go",#{event:=button_press}},State) ->
     if State#state.uart =:= undefined ->
 	    {noreply, State};
        true ->
@@ -625,7 +648,7 @@ handle_info({button,"uart.lpc_go",#{value:=1}},State) ->
 	    end,
 	    {noreply, State}
     end;
-handle_info({button,"uart.lpc_reset",#{value:=1}},State) ->
+handle_info({button,"uart.lpc_reset",#{event:=button_press}},State) ->
     if State#state.uart =:= undefined ->
 	    {noreply, State};
        true ->
@@ -635,7 +658,7 @@ handle_info({button,"uart.lpc_reset",#{value:=1}},State) ->
 	    end,
 	    {noreply, State}
     end;
-handle_info({button,_ID,#{value:=0}},State) ->
+handle_info({button,_ID,#{event:=button_release}},State) ->
     %% ignore button release
     {noreply,State};
 
@@ -1376,7 +1399,7 @@ text_cell(ID,X,Y,W,H,Opts) ->
 
 text_cell_dimension() ->
     text("dummy", 0, 0, 10, 10, [{text,""}]),
-    {ok,[{font,Font}]} = epxy:get("dummy", [font]),
+    [{font,Font}] = epxy:get("dummy", [font]),
     epx_gc:set_font(Font),
     {TxW0,TxH} = epx_font:dimension(epx_gc:current(), "Wy"),
     TxW = TxW0 div 2,
@@ -1535,10 +1558,14 @@ uBoot(X,Y,_W,_H) ->
 
     {_,Y2,W1,H1} = edit_text("ubt.serial", "Serial", X1, Y1+YGap, TW),
     epxy:set("ubt.serial", [{filter,{?MODULE,event_filter,[dec]}}]),
+    epxy:add_callback("ubt.serial",numeric_item,?MODULE),
+
     {_,Y3,W2,H2} = product_menu("ubt.product", "Product", X1, Y2+YGap, TW),
+
     {_,Y4,W3,H3} = edit_text("ubt.creation", "Creation", X1, Y3+YGap, TW),
     {_,Y5,W4,H4} = edit_text("ubt.addr", "Address", X1, Y4+YGap, TW),
     epxy:set("ubt.addr", [{filter,{?MODULE,event_filter,[hex]}}]),
+    epxy:add_callback("ubt.addr",numeric_item,?MODULE),
 
     {W5,H5} = add_uboot_buttons(ID, X1, Y5+YGap),
 
@@ -1595,8 +1622,10 @@ uartBoot(X,Y,_W,_H) ->
     YY0 = YGap,
     XX0 = XGap,
     {_,YY1,WW0,HH0} = tagged_text("uart.ubt.app_vsn","Version",X1,YY0,TW),
+
     {_,YY2,WW1,HH1} = edit_text("uart.ubt.serial","Serial", X1, YY1+YGap, TW),
     epxy:set("uart.ubt.serial", [{filter,{?MODULE,event_filter,[dec]}}]),
+
     {_,YY3,WW2,HH2} = edit_text("uart.ubt.product","Product",X1,YY2+YGap,TW),
     {_,YY4,WW3,HH3} = edit_text("uart.ubt.creation","Creation",X1,YY3+YGap,TW),
     {_,YY5,WW4,HH4} = edit_text("uart.ubt.addr","Address",X1,YY4+YGap,TW),
@@ -2611,7 +2640,7 @@ switch_state(ID,Alarm) ->
     epxy:set(ID,[{color,red},{text,Alarm}]).
 
 get_switch_state(ID) ->
-    {ok,[{text,Text}]} = epxy:get(ID, [text]),
+    [{text,Text}] = epxy:get(ID, [text]),
     case Text of
 	"OFF" -> off;
 	"ON" -> on;
