@@ -47,34 +47,35 @@
 
 -type cannode() ::
 	#{
-	   pos => integer(),
-	   id  => integer(),
-	   serial => integer(),
-	   vsn => {Major::integer(),Minor::integer()},
-	   product => atom(),
-	   app_vsn => integer(),
-	   status => up | down | boot | flash | ok | error | free,
-	   activity => integer()        %% system time of last activity
+	  pos => integer(),
+	  id  => integer(),
+	  serial => integer(),
+	  vsn => {Major::integer(),Minor::integer()},
+	  product => atom(),
+	  app_vsn => integer(),
+	  status => up | down | boot | flash | ok | error | free,
+	  activity => integer()        %% system time of last activity
 	 }.
 
 -record(state,
 	{
-	  uart,            %% serial flash uart device
-	  echo_timer,      %% CANbus ping timer
-	  hold_mode=false, %% hold the (selected) booting node
-	  selected_tab,    %% "nodes" | "uarts" | undefined
-	  selected_pos,    %% Selected row | undefined
-	  selected_eff=0,  %% extended canid of selected node
-	  selected_sff=0,  %% short canid of selected node
-	  sdo_request,     %% current outstanding sdo_request
-	  sdo_error,       %% last sdo_error
-	  row_height = 1,  %% height of row selection area
-	  firmware = [],   %% list of available firmware for upgrade
-	  nodes = [] :: [cannode()],    %% list of can nodes
-	  uarts = [] :: [uart()],       %% list of uarts
-	  elpc,                         %% Elpc options
-	  dev_type,                     %% Elpc devict type
-	  dev_info = []                 %% Elpc last scanned info
+	 uart,            %% serial flash uart device
+	 echo_timer,      %% CANbus ping timer
+	 hold_mode=false, %% hold the (selected) booting node
+	 selected_tab,    %% "nodes" | "uarts" | undefined
+	 selected_pos,    %% Selected row | undefined
+	 selected_eff=0,  %% extended canid of selected node
+	 selected_sff=0,  %% short canid of selected node
+	 sdo_request,     %% current outstanding sdo_request
+	 sdo_error,       %% last sdo_error
+	 row_height = 1,  %% height of row selection area
+	 firmware = [],   %% list of available firmware for upgrade
+	 nodes = [] :: [cannode()],    %% list of can nodes
+	 uarts = [] :: [uart()],       %% list of uarts
+	 elpc,                         %% Elpc options
+	 dev_type,                     %% Elpc devict type
+	 dev_info = [],                %% Elpc last scanned info
+	 use_virtual_keyboard
 	}).
 
 -define(ACTIVITY_TIMEOUT, (10*1000000)). %% time when node is considered down
@@ -167,7 +168,7 @@
 -define(CN_APP_NONE,         16#FFFFFFFF).
 -define(CN_APP_EMPTY,        16#2F5EBD7A). %% 0101111010111101011110101111010
 
-%%-define(dbg(F,A), io:format((F),(A))).
+%% -define(dbg(F,A), io:format((F),(A))).
 -define(dbg(F,A), ok).
 -define(warn(F,A), io:format((F),(A))).
 -define(error(F,A), io:format((F),(A))).
@@ -230,6 +231,7 @@ init(Options) ->
 			]),
     [{width,Nw},{height,Nh}] = epxy:get("numeric", [width,height]),
     epxy:set("numeric", [{x,(800-Nw) div 2}, {y,(480-Nh)}]),
+    UseVirtualKeyboard = proplists:get_value(use_virtual_keyboard, Env, false),
 
     %% define various layouts
     X = Width div 2,
@@ -256,8 +258,14 @@ init(Options) ->
 
     EchoTimer = erlang:start_timer(?ECHO_INTERVAL, self(), echo_timeout),
 
-    {ok, #state{ echo_timer = EchoTimer, row_height = RH1, firmware = Firmware, 
-		 nodes = [], uarts = UARTS, elpc = Elpc }}.
+    {ok, #state{ echo_timer = EchoTimer, 
+		 row_height = RH1, 
+		 firmware = Firmware, 
+		 nodes = [], 
+		 uarts = UARTS, 
+		 elpc = Elpc,
+		 use_virtual_keyboard = UseVirtualKeyboard
+	       }}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -409,14 +417,22 @@ handle_info({menu,"ubt.product",#{event:=changed,value:=I}}, State) ->
 		    {noreply, State2}
 	    end
     end;
-handle_info({numeric_item,_ID,#{event:=focus_in}},State) ->
+handle_info({numeric_item,_ID,#{event:=focus_in}},State) ->    
     %% show numeric keyboard if requested
-    epxy:set("numeric", [{hidden,false}, {disabled,false}]),
+    if State#state.use_virtual_keyboard ->
+	    epxy:set("numeric", [{hidden,false}, {disabled,rest}]);
+       true ->
+	    ok
+    end,
     {noreply, State};
 handle_info({numeric_item,_ID,#{event:=focus_out}},State) ->
-    %% show numeric keyboard if requested
-    epxy:set("numeric", [{hidden,true}, {disabled,true}]),
-    {noreply, State};    
+    %% hide numeric keyboard if requested
+    if State#state.use_virtual_keyboard ->
+	    epxy:set("numeric", [{hidden,true}, {disabled,true}]);
+       true ->
+	    ok
+    end,
+    {noreply, State};
 
 handle_info({select,_ID,#{event:=button_release}},State) ->
     %% ignore mouse release in node selection
