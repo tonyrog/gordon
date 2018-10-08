@@ -62,6 +62,7 @@
 	 uart,            %% serial flash uart device
 	 echo_timer,      %% CANbus ping timer
 	 hold_mode=false, %% hold the (selected) booting node
+	 uart_hold_mode=false, %% hold from uart in boot loader
 	 selected_tab,    %% "nodes" | "uarts" | undefined
 	 selected_pos,    %% Selected row | undefined
 	 selected_eff=0,  %% extended canid of selected node
@@ -674,6 +675,50 @@ handle_info({button,"uart.lpc_reset",#{event:=button_press}},State) ->
 	    end,
 	    {noreply, State}
     end;
+handle_info({button,"uart.ubt.hold",#{event:=button_press}},State) ->
+    case State#state.uart of
+	undefined ->
+	    {noreply, State};
+	U ->
+	    %% try send "show vsn\n" and look for answer
+	    case detect_uart_hold(U,1000) of
+		true ->
+		    io:format("HOLD=already\n"),
+		    collect_uart_info(U),
+		    {noreply, State#state { uart_hold_mode=true }};
+		false ->
+		    %% check if DMX then uart is not enabled!!!
+		    elpcisp:reset(U),
+		    timer:sleep(500), %% wait for boot
+		    case detect_uart_hold(U,1000) of
+			true ->
+			    io:format("HOLD=true\n"),
+			    collect_uart_info(U),
+			    {noreply, State#state { uart_hold_mode=true }};
+			false ->
+			    io:format("HOLD=false\n"),
+			    {noreply, State#state { uart_hold_mode=false }}
+		    end
+	    end
+    end;
+handle_info({button,"uart.ubt.go",#{event:=button_press}},State) ->
+    case State#state.uart of
+	undefined -> {noreply, State};
+	U when State#state.uart_hold_mode ->
+	    uart:send(U, "go\n"),
+	    {noreply, State#state { uart_hold_mode = false }};
+	_ ->
+	    {noreply, State}
+    end;
+handle_info({button,"uart.ubt.reset",#{event:=button_press}},State) ->
+    case State#state.uart of
+	undefined -> {noreply, State};
+	U when State#state.uart_hold_mode ->
+	    uart:send(U, "reset\n"),
+	    {noreply, State#state { uart_hold_mode = false }};
+	_ ->
+	    {noreply, State}
+    end;
 handle_info({button,_ID,#{event:=button_release}},State) ->
     %% ignore button release
     {noreply,State};
@@ -752,6 +797,73 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+%% we sent show vsn lookup 0x1234abcd
+detect_uart_hold(U, Timeout) ->
+    uart:send(U, "show vsn\n"),
+    detect_uart_hold_(U, Timeout).
+
+detect_uart_hold_(U, Timeout) ->
+    receive
+	{uart, U, <<">", Command/binary>>} ->
+	    io:format("FLUSH >~p\n", [Command]),
+	    detect_uart_hold_(U, Timeout);
+	{uart, U, <<"0x", Vsn/binary>>} ->
+	    io:format("VSN = ~p\n", [Vsn]),
+	    true;
+	{uart, U, Data} ->
+	    io:format("FLUSH ~p\n", [Data]),
+	    detect_uart_hold_(U, Timeout)
+    after
+	Timeout -> false
+    end.
+
+collect_uart_info(U) ->
+    Serial   = uart_read_num(U, "serial"),
+    Product  = uart_read_num(U, "product"),
+    Datetime = uart_read_num(U, "datetime"),
+    AppAddr  = uart_read_num(U, "addr"),
+    AppVsn   = uart_read_num(U, "vsn"),
+    io:format("Serial = ~8.16.0B\n", [Serial]),
+    io:format("Product = ~8.16.0B\n", [Product]),
+    io:format("Datetime = ~w\n", [Datetime]),
+    io:format("AppAddr = ~8.16.0B\n", [AppAddr]),
+    io:format("AppVsn = ~8.16.0B\n", [AppVsn]),
+    [{serial,(Serial bsr 8)},{product,Product},
+     {datetime,Datetime},{app_addr, AppAddr},
+     {app_vsn,AppVsn}].
+
+uart_read_num(U, Item) ->
+    uart:send(U, "show "++Item++"\n"),
+    uart_recv_num(U, 1000).
+
+uart_recv_num(U, Timeout) ->
+    receive
+	{uart, U, <<">", Command/binary>>} ->
+	    io:format("FLUSH COMMAND ~p\n", [Command]),
+	    uart_recv_num(U, Timeout);
+	{uart, U, Bin=(<<"0x",Hex/binary>>)} ->
+	    Num = string:trim(binary_to_list(Hex)),
+	    io:format("HEX = ~p\n", [Num]),
+	    try list_to_integer(Num,16) of
+		Value -> Value
+	    catch
+		error:_ -> -1
+	    end;
+	{uart, U, Bin=(<<C,_/binary>>)} when C >= $0, C =< $9 ->
+	    Num = string:trim(binary_to_list(Bin)),
+	    io:format("DEC = ~p\n", [Num]),
+	    try list_to_integer(Num, 10) of
+		Value -> Value
+	    catch
+		error:_ -> -1
+	    end;
+	{uart, U, Data} ->
+	    io:format("FLUSH ~p\n", [Data]),
+	    uart_recv_num(U, Timeout)
+    after
+	Timeout -> -1
+    end.
 
 %% Product menu
 product_menu() ->
