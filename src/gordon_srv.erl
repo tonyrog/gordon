@@ -36,13 +36,18 @@
 
 -type uart() :: 
 	#{
-	   pos => integer(),
-	   device => string(),
-	   baud => integer(),
-	   control => boolean(),
-	   control_swap => boolean(),
-	   control_inv => boolean(),
-	   status => idle | scan | error | ok
+	  pos => integer(),
+	  uart => atom(),
+	  device => string(),
+	  baud => integer(),
+	  control => boolean(),
+	  control_swap => boolean(),
+	  control_inv => boolean(),
+	  status => idle | scan | error | ok,
+	  lpc_type => integer(),         %% LPC device type
+	  lpc_info => [{atom(),term()}], %% LPC last scanned info
+	  hold => boolean(),
+	  ubt_info => [{atom(),term()}]  %% serial uboot information
 	 }.
 
 -type cannode() ::
@@ -59,10 +64,8 @@
 
 -record(state,
 	{
-	 uart,            %% serial flash uart device
 	 echo_timer,      %% CANbus ping timer
 	 hold_mode=false, %% hold the (selected) booting node
-	 uart_hold_mode=false, %% hold from uart in boot loader
 	 selected_tab,    %% "nodes" | "uarts" | undefined
 	 selected_pos,    %% Selected row | undefined
 	 selected_eff=0,  %% extended canid of selected node
@@ -73,9 +76,6 @@
 	 firmware = [],   %% list of available firmware for upgrade
 	 nodes = [] :: [cannode()],    %% list of can nodes
 	 uarts = [] :: [uart()],       %% list of uarts
-	 elpc,                         %% Elpc options
-	 dev_type,                     %% Elpc devict type
-	 dev_info = [],                %% Elpc last scanned info
 	 use_virtual_keyboard
 	}).
 
@@ -254,17 +254,16 @@ init(Options) ->
 
     Firmware = load_firmware(),
 
-    Elpc = proplists:get_value(elpc,Env,undefined),
-    UARTS = set_elpc_row(Elpc),
+    Devices = proplists:get_value(devices,Env,[]),
+    UARTS = make_uart_list(Devices),
 
     EchoTimer = erlang:start_timer(?ECHO_INTERVAL, self(), echo_timeout),
 
     {ok, #state{ echo_timer = EchoTimer, 
 		 row_height = RH1, 
 		 firmware = Firmware, 
-		 nodes = [], 
+		 nodes = [],
 		 uarts = UARTS, 
-		 elpc = Elpc,
 		 use_virtual_keyboard = UseVirtualKeyboard
 	       }}.
 
@@ -387,15 +386,20 @@ handle_info({select,"uarts.r"++RTxt,#{event:=button_press}},State) ->
 	undefined ->
 	    {noreply, State1};
 	"uart" ->
-	    highlight_row(Tab,Pos),
-	    State2 = State1#state { selected_tab = Tab,
-				    selected_pos = Pos,
-				    selected_eff = undefined,
-				    selected_sff = undefined
-				    },
-	    show_pos(Tab,Pos,State2),
-	    State3 = refresh_uart_state(State2),
-	    {noreply, State3};
+	    case find_uart_by_pos(Tab,Pos,State#state.uarts) of
+		false ->
+		    {noreply, State1};
+		Uart ->
+		    highlight_row(Tab,Pos),
+		    State2 = State1#state { selected_tab = Tab,
+					    selected_pos = Pos,
+					    selected_eff = undefined,
+					    selected_sff = undefined
+					  },
+		    show_pos(Tab,Pos,State2),
+		    State3 = refresh_uart_state(Uart,State2),
+		    {noreply, State3}
+	    end;
 	_ ->
 	    {noreply, State1}
     end;
@@ -573,119 +577,150 @@ handle_info({button,[_,_,_|".restore"],#{event:=button_press}},State) ->
     {noreply, action_sdo(State,up,?IX_RESTORE_DEFAULT_PARAMETERS,1,<<"daol">>)};
 
 handle_info({button,"uart.lpc_open",#{event:=button_press}},State) ->
-    if State#state.uart =:= undefined, is_list(State#state.elpc) ->
-	    %% fixme open using correct device if multiple!
-	    Elpc = State#state.elpc,
-	    ElpcDevice = proplists:get_value(device,Elpc),
-	    ElpcBaud   = proplists:get_value(baud,Elpc,38400),
-	    ElpcControl = proplists:get_value(control,Elpc,false),
-	    ElpcControlSwap = proplists:get_value(control_swap,Elpc,false),
-	    ElpcControlInv = proplists:get_value(control_inv,Elpc,false),
-	    put(control, ElpcControl),
-	    put(control_swap, ElpcControlSwap),
-	    put(control_inv, ElpcControlInv),
-	    set_elpc_status(sync),
-	    case elpcisp:open(ElpcDevice, ElpcBaud) of
+    case find_uart_by_pos(State#state.selected_tab,
+			  State#state.selected_pos,
+			  State#state.uarts) of
+	false ->
+	    {noreply,State};
+	Uart = #{ pos := I, uart := undefined, device := Device } ->
+	    Baud = maps:get(baud,Uart,38400),
+	    Control = maps:get(control,Uart,false),
+	    ControlSwap = maps:get(control_swap,Uart,false),
+	    ControlInv = maps:get(control_inv,Uart,false),
+	    put(control, Control),
+	    put(control_swap, ControlSwap),
+	    put(control_inv, ControlInv),
+	    set_uart_status(I,sync),
+	    io:format("open device ~s @ ~w baud\n", [Device, Baud]),
+	    case elpcisp:open(Device, Baud) of
 		{ok,U} ->
 		    case elpcisp:sync_osc(U, 4, 1000, "12000") of
 			{ok,_} ->
 			    case elpcisp:read_device_type(U) of
-				{ok,DT} ->
+				{ok,DevType} ->
 				    Info = elpcisp:info(U),
-				    set_elpc_info(Info),
-				    set_elpc_status(open),
-				    {noreply, State#state { uart = U,
-							    dev_info = Info,
-							    dev_type = DT }};
+				    set_uart_status(I,open),
+				    Uart1 = Uart#{ uart=>U,
+						   lpc_info=>Info,
+						   lpc_type=>DevType },
+				    refresh_uart_state(Uart1, State),
+				    State1 = update_uart(Uart1, State),
+				    {noreply, State1};
 				_Error ->
 				    elpcisp:close(U),
 				    ?dbg("elpcisp read error ~p\n", [_Error]),
-				    set_elpc_status(error),
+				    set_uart_status(I,error),
 				    {noreply, State}
 			    end;
 			_Error ->
 			    elpcisp:close(U),
 			    ?dbg("elpcisp read error ~p\n", [_Error]),
-			    set_elpc_status(error),
-			    set_elpc_info([]),
+			    set_uart_status(I,error),
+			    set_lpc_info([]),
 			    {noreply, State}
 		    end;
 		_Error ->
 		    ?dbg("elpcisp open error ~p\n", [_Error]),
-		    set_elpc_status(error),
-		    set_elpc_info([]),
+		    set_uart_status(I,error),
+		    set_lpc_info([]),
 		    {noreply, State}
 	    end;
-       is_port(State#state.uart) ->
-	    DevType = case elpcisp:read_device_type(State#state.uart) of
+	Uart = #{ pos :=I, uart := U } when is_port(U) ->
+	    DevType = case elpcisp:read_device_type(U) of
 			  {ok,DT} -> DT;
 			  _ -> undefined
 		      end,
-	    Info = elpcisp:info(State#state.uart),
-	    set_elpc_info(Info),
-	    {noreply, State#state { dev_info = Info, dev_type = DevType }};
-       true ->
-	    set_elpc_info([]),
-	    {noreply, State#state { dev_info = [], dev_type = undefined }}
+	    set_uart_status(I,open),
+	    Info = elpcisp:info(U),
+	    Uart1 = Uart#{ lpc_info=>Info,
+			   lpc_type=>DevType },
+	    refresh_uart_state(Uart1, State),
+	    State1 = update_uart(Uart1, State),
+	    {noreply, State1}
     end;
 
 handle_info({button,"uart.lpc_flash",#{event:=button_press}},State) ->
     case lists:keyfind(ihex,1,State#state.firmware) of
-	{ihex,Firmware} when State#state.uart =/= undefined ->
-	    case elpcisp:unlock(State#state.uart) of
-		{ok,_} ->
-		    Elpc = State#state.elpc,
-		    ElpcBaud = proplists:get_value(baud,Elpc,38400),
-		    elpcisp:flash_set_baudrate(State#state.uart,ElpcBaud),
-		    set_elpc_status(flash),
-		    case flash_firmware(State#state.uart, Firmware,
-					State#state.dev_type) of
-			ok ->
-			    set_elpc_status(open);
+	{ihex,Firmware} ->
+	    case find_uart_by_pos(State#state.selected_tab,
+				  State#state.selected_pos,
+				  State#state.uarts) of
+		false ->
+		    {noreply, State};
+		#{ pos := I, uart := U, baud := Baud,
+			  dev_type := DevType } when is_port(U) ->
+		    case elpcisp:unlock(U) of
+			{ok,_} ->
+			    elpcisp:flash_set_baudrate(U,Baud),
+			    set_uart_status(I,flash),
+			    case flash_firmware(U, Firmware, DevType) of
+				ok ->
+				    set_uart_status(I,open);
+				_Error ->
+				    ?dbg("elpcisp flash error ~p\n", [_Error]),
+				    set_uart_status(I,error)
+			    end;
 			_Error ->
-			    ?dbg("elpcisp flash error ~p\n", [_Error]),
-			    set_elpc_status(error)
-		    end;
-		_Error ->
-		    ?dbg("elpcisp unlock error ~p\n", [_Error]),
-		    set_elpc_status(error)
-	    end,
-	    {noreply, State};
+			    ?dbg("elpcisp unlock error ~p\n", [_Error]),
+			    set_uart_status(I,error)
+		    end,
+		    {noreply, State};
+		_ ->
+		    {noreply, State}
+	    end;
 	_ ->
 	    {noreply, State}
     end;
 
 handle_info({button,"uart.lpc_go",#{event:=button_press}},State) ->
-    if State#state.uart =:= undefined ->
+    case find_uart_by_pos(State#state.selected_tab,
+			  State#state.selected_pos,
+			  State#state.uarts) of
+	false ->
 	    {noreply, State};
-       true ->
-	    case elpcisp:go(State#state.uart, 0) of
-		{ok,_} -> set_elpc_status(open);
-		_Error -> set_elpc_status(error)
+	#{ uart := undefined } ->
+	    {noreply, State};
+	#{ pos := I, uart := U } ->
+	    case elpcisp:go(U, 0) of
+		{ok,_} -> set_uart_status(I,open);
+		_Error -> set_uart_status(I,error)
 	    end,
 	    {noreply, State}
     end;
 handle_info({button,"uart.lpc_reset",#{event:=button_press}},State) ->
-    if State#state.uart =:= undefined ->
+    case find_uart_by_pos(State#state.selected_tab,
+			  State#state.selected_pos,
+			  State#state.uarts) of
+	false ->
 	    {noreply, State};
-       true ->
-	    case elpcisp:reset(State#state.uart) of
-		{ok,_} -> set_elpc_status(open);
-		_Error -> set_elpc_status(error)
+	#{ uart := undefined } ->
+	    {noreply, State};
+	#{ pos := I, uart := U } ->	
+	    case elpcisp:reset(U) of
+		{ok,_} -> set_uart_status(I,open);
+		_Error -> set_uart_status(I,error)
 	    end,
 	    {noreply, State}
     end;
 handle_info({button,"uart.ubt.hold",#{event:=button_press}},State) ->
-    case State#state.uart of
-	undefined ->
+    case find_uart_by_pos(State#state.selected_tab,
+			  State#state.selected_pos,
+			  State#state.uarts) of
+	false ->
 	    {noreply, State};
-	U ->
+	#{ uart := undefined } ->
+	    {noreply, State};
+	Uart = #{ pos := I, uart := U } ->
 	    %% try send "show vsn\n" and look for answer
 	    case detect_uart_hold(U,1000) of
 		true ->
 		    io:format("HOLD=already\n"),
-		    collect_uart_info(U),
-		    {noreply, State#state { uart_hold_mode=true }};
+		    set_uart_status(I,hold),
+		    Info = collect_uart_info(U),
+		    Uart1 = Uart#{ hold=>true, ubt_info=>Info },
+		    refresh_uart_state(Uart1, State),
+		    State1 = update_uart(Uart1, State),
+		    {noreply, State1};
 		false ->
 		    %% check if DMX then uart is not enabled!!!
 		    elpcisp:reset(U),
@@ -693,29 +728,54 @@ handle_info({button,"uart.ubt.hold",#{event:=button_press}},State) ->
 		    case detect_uart_hold(U,1000) of
 			true ->
 			    io:format("HOLD=true\n"),
-			    collect_uart_info(U),
-			    {noreply, State#state { uart_hold_mode=true }};
+			    set_uart_status(I,hold),
+			    Info = collect_uart_info(U),
+			    Uart1 = Uart#{ hold=>true, ubt_info=>Info },
+			    refresh_uart_state(Uart1, State),
+			    State1 = update_uart(Uart1, State),
+			    {noreply, State1};
 			false ->
 			    io:format("HOLD=false\n"),
-			    {noreply, State#state { uart_hold_mode=false }}
+			    set_uart_status(I,open),
+			    Uart1 = Uart#{ hold=>false, ubt_info=>[] },
+			    refresh_uart_state(Uart1, State),
+			    State1 = update_uart(Uart1, State),
+			    {noreply, State1}
 		    end
 	    end
     end;
+
 handle_info({button,"uart.ubt.go",#{event:=button_press}},State) ->
-    case State#state.uart of
-	undefined -> {noreply, State};
-	U when State#state.uart_hold_mode ->
+    case find_uart_by_pos(State#state.selected_tab,
+			  State#state.selected_pos,
+			  State#state.uarts) of
+	false ->
+	    {noreply, State};
+	#{ uart := undefined } ->
+	    {noreply, State};
+	Uart = #{ pos := I, uart := U, hold := true } when is_port(U) ->
 	    uart:send(U, "go\n"),
-	    {noreply, State#state { uart_hold_mode = false }};
+	    set_uart_status(I,open),
+	    Uart1 = Uart#{ hold=>false },
+	    State1 = update_uart(Uart1, State),
+	    {noreply, State1};
 	_ ->
 	    {noreply, State}
     end;
 handle_info({button,"uart.ubt.reset",#{event:=button_press}},State) ->
-    case State#state.uart of
-	undefined -> {noreply, State};
-	U when State#state.uart_hold_mode ->
+    case find_uart_by_pos(State#state.selected_tab,
+			  State#state.selected_pos,
+			  State#state.uarts) of
+	false ->
+	    {noreply, State};
+	#{ uart := undefined } ->
+	    {noreply, State};
+	Uart = #{ pos := I, uart := U, hold := true } when is_port(U) ->
 	    uart:send(U, "reset\n"),
-	    {noreply, State#state { uart_hold_mode = false }};
+	    Uart1 = Uart#{ hold=>false },
+	    set_uart_status(I,open),
+	    State1 = update_uart(Uart1, State),
+	    {noreply, State1};
 	_ ->
 	    {noreply, State}
     end;
@@ -842,9 +902,9 @@ uart_recv_num(U, Timeout) ->
 	{uart, U, <<">", Command/binary>>} ->
 	    io:format("FLUSH COMMAND ~p\n", [Command]),
 	    uart_recv_num(U, Timeout);
-	{uart, U, Bin=(<<"0x",Hex/binary>>)} ->
+	{uart, U, (<<"0x",Hex/binary>>)} ->
 	    Num = string:trim(binary_to_list(Hex)),
-	    io:format("HEX = ~p\n", [Num]),
+	    %% io:format("HEX = ~p\n", [Num]),
 	    try list_to_integer(Num,16) of
 		Value -> Value
 	    catch
@@ -852,14 +912,14 @@ uart_recv_num(U, Timeout) ->
 	    end;
 	{uart, U, Bin=(<<C,_/binary>>)} when C >= $0, C =< $9 ->
 	    Num = string:trim(binary_to_list(Bin)),
-	    io:format("DEC = ~p\n", [Num]),
+	    %% io:format("DEC = ~p\n", [Num]),
 	    try list_to_integer(Num, 10) of
 		Value -> Value
 	    catch
 		error:_ -> -1
 	    end;
-	{uart, U, Data} ->
-	    io:format("FLUSH ~p\n", [Data]),
+	{uart, U, _Data} ->
+	    %% io:format("FLUSH ~p\n", [Data]),
 	    uart_recv_num(U, Timeout)
     after
 	Timeout -> -1
@@ -904,28 +964,51 @@ keyindex_(Value, KeyPos, [_|Ts], I) ->
 keyindex_(_Value, _KeyPos, [], _I) ->
     0.
 
-set_elpc_row(undefined) ->
+make_uart_list([]) ->
     [];
-set_elpc_row(Elpc) ->
-    ElpcDevice = proplists:get_value(device,Elpc),
-    ElpcBaud   = proplists:get_value(baud,Elpc,38400),
-    ElpcControl = proplists:get_value(control,Elpc,false),
-    ElpcControlSwap = proplists:get_value(control_swap,Elpc,false),
-    ElpcControlInv = proplists:get_value(control_inv,Elpc,false),
+make_uart_list([{uart,I,Opts}|Us]) when is_integer(I), I>0 ->
+    Device = proplists:get_value(device,Opts),
+    Baud   = proplists:get_value(baud,Opts,38400),
+    Control = proplists:get_value(control,Opts,false),
+    ControlSwap = proplists:get_value(control_swap,Opts,false),
+    ControlInv = proplists:get_value(control_inv,Opts,false),
     %%
-    {Manuf0,Prod0,Serial0} = get_name_info(ElpcDevice),
+    {Manuf0,Prod0,Serial0} = get_name_info(Device),
     Manuf = trunc_text(Manuf0,12),
-    _Prod  = trunc_text(Prod0,12),
+    _Prod = trunc_text(Prod0,12),
     Serial = trunc_text(Serial0,8),
-    set_uart_text(device,1,Manuf++" "++Serial),
-    set_uart_text(baud,1,ElpcBaud),
-    set_uart_text(control,1,uint1(ElpcControl)),
-    set_uart_text(swap,1,uint1(ElpcControlSwap)),
-    set_uart_text(invert,1,uint1(ElpcControlInv)),
-    set_elpc_status(idle),
-    [ #{ pos => 1, device => ElpcDevice, baud => ElpcBaud,
-	 control => ElpcControl, control_swap => ElpcControlSwap,
-	 control_inv => ElpcControlInv, status => idle } ].
+    set_uart_text(device,I,Manuf++" "++Serial),
+    set_uart_text(baud,I,Baud),
+    set_uart_text(control,I,uint1(Control)),
+    set_uart_text(swap,I,uint1(ControlSwap)),
+    set_uart_text(invert,I,uint1(ControlInv)),
+    set_uart_status(I,idle),
+    [ #{ pos => I, 
+	 uart => undefined,
+	 device => Device, 
+	 baud => Baud,
+	 control => Control, 
+	 control_swap => ControlSwap,
+	 control_inv => ControlInv, 
+	 status => idle,
+	 lpc_type => 0,
+	 lpc_info => [],
+	 hold => false,
+	 ubt_info => []
+       } | make_uart_list(Us)].
+
+set_uart_ubt_info(Info) ->
+    Serial   = proplists:get_value(serial,Info),
+    Product  = proplists:get_value(product,Info),
+    Creation = proplists:get_value(datetime,Info),
+    AppAddr  = proplists:get_value(app_addr,Info),
+    AppVsn   = proplists:get_value(app_vsn,Info),
+    epxy:set("uart.ubt.app_vsn", [{text,format_value(app_vsn,AppVsn)}]),
+    epxy:set("uart.ubt.serial", [{text,format_value(serial,Serial)}]),
+    epxy:set("uart.ubt.product", [{text,format_product(Product)}]),
+    epxy:set("uart.ubt.creation", [{text,format_date(Creation)}]),
+    epxy:set("uart.ubt.addr", [{text,format_value(app_addr,AppAddr)}]),
+    ok.
 
 uint1(true) -> 1;
 uint1(false) -> 0.
@@ -955,25 +1038,30 @@ get_name_info("/dev/serial/by-id/usb-"++Name) ->
 get_name_info("/dev/"++Name) ->
     {"","USB",Name}.
 
+set_uart_status(I,Status) ->
+    set_uart_text(status,I,Status).
 
-set_elpc_status(Status) ->
-    set_uart_text(status,1,Status).
-
-set_elpc_info(Info) ->
+set_lpc_info(Info) ->
     Vsn = proplists:get_value(version, Info),
-    Product = proplists:get_value(product, Info),
+    epxy:set("uart.vsn",[{text,format_value(vsn,Vsn)}]),
+
+    Product = proplists:get_value(product, Info, ""),
+    epxy:set("uart.product",[{text,Product}]),
+    
     FlashSize = proplists:get_value(flashSize, Info),
+    epxy:set("uart.flashSize",[{text,format_value(flashSize,FlashSize)}]),
+
     RamSize = proplists:get_value(ramSize, Info),
+    epxy:set("uart.ramSize",[{text,format_value(ramSize,RamSize)}]),
+
     FlashSectors = proplists:get_value(flashSectors, Info),
+    epxy:set("uart.flashSectors",[{text,format_value(flashSectors,FlashSectors)}]),
+
     MaxCopySize = proplists:get_value(maxCopySize, Info),
+    epxy:set("uart.maxCopySize",[{text,format_value(maxCopySize,MaxCopySize)}]),
+
     Variant = proplists:get_value(variant, Info),
-    epxy:set("uart.vsn", [{text,format_value(vsn,Vsn)}]),
-    epxy:set("uart.product", [{text,Product}]),
-    epxy:set("uart.flashSize", [{text,format_value(flashSize,FlashSize)}]),
-    epxy:set("uart.ramSize", [{text,format_value(ramSize,RamSize)}]),
-    epxy:set("uart.flashSectors", [{text,format_value(flashSectors,FlashSectors)}]),
-    epxy:set("uart.maxCopySize", [{text,format_value(maxCopySize,MaxCopySize)}]),
-    epxy:set("uart.variant", [{text,format_value(variant,Variant)}]),
+    epxy:set("uart.variant",[{text,format_value(variant,Variant)}]),
     ok.
 
 
@@ -1048,16 +1136,39 @@ refresh_uart_state(State) ->
 			  State#state.selected_pos,
 			  State#state.uarts) of
 	false -> State;
-	Uart -> refresh_uart_state(selected_id(State),Uart,State)
+	Uart -> refresh_uart_state(Uart,State)
     end.
 
-refresh_uart_state(SID, _Uart, State) ->
-    if State#state.uart =:= undefined ->
-	    enable_buttons(SID,["lpc_open", "lpc_reset"]),
-	    disable_buttons(SID, ["lpc_go", "lpc_flash"]);
-       true ->
-	    enable_buttons(SID,["lpc_reset", "lpc_go", "lpc_flash"]),
-	    disable_buttons(SID, ["lpc_open"])
+refresh_uart_state(Uart, State) ->
+    refresh_uart_state(selected_id(State), Uart, State).
+
+refresh_uart_state(SID, Uart, State) ->
+    case Uart of
+	#{ uart := U, lpc_info := LpcInfo, ubt_info := UbtInfo } 
+	  when is_port(U) ->
+	    case lists:keyfind(ihex,1,State#state.firmware) of
+		{ihex,_Firmware} ->
+		    enable_buttons(SID,  ["lpc_flash"]);
+		_ ->
+		    disable_buttons(SID,  ["lpc_flash"])
+	    end,
+	    enable_buttons(SID,  ["lpc_reset", "lpc_go"]),
+	    disable_buttons(SID, ["lpc_open"]),
+	    enable_buttons("uart.ubt", ["hold"]),
+	    case maps:get(hold, Uart, false) of
+		true ->
+		    enable_buttons("uart.ubt", ["go", "reset"]);
+		false ->
+		    disable_buttons("uart.ubt", ["go", "reset"])
+	    end,
+	    set_lpc_info(LpcInfo),
+	    set_uart_ubt_info(UbtInfo);
+	#{ lpc_info := LpcInfo, ubt_info := UbtInfo } ->
+	    enable_buttons(SID,  ["lpc_open"]),
+	    disable_buttons(SID, ["lpc_go", "lpc_flash", "lpc_reset"]),
+	    disable_buttons("uart.ubt", ["hold", "go", "reset"]),
+	    set_lpc_info(LpcInfo),
+	    set_uart_ubt_info(UbtInfo)
     end,
     State.
 
@@ -1235,7 +1346,6 @@ event_filter(filter,Event,_Widget,_Window,_XY,hex) ->
     end;
 event_filter(_Type,_Event,_Widget,_Window,_XY,_Arg) ->
     true.
-
 
 deselect_row(undefined,_Pos, State) -> State;
 deselect_row(_Tab,undefined, State) -> State;
@@ -2912,12 +3022,16 @@ set_uart_text(Key,Pos,Value) ->
 format_hex32(Value) when is_integer(Value) ->
     tl(integer_to_list(16#100000000+Value, 16)).
 
+format_date(undefined) -> 
+    "";
 format_date(Value) when is_integer(Value) ->
     {{Year,Mon,Day},{_H,_M,_S}} = 
 	calendar:gregorian_seconds_to_datetime(Value+62167219200),
     lists:flatten(io_lib:format("~4..0w-~2..0w-~2..0w", 
 				[Year,Mon,Day])).
 
+format_product(undefined) -> 
+    "";
 format_product(Code) ->
     case Code bsr 16 of
 	?PRODUCT_PDS_DMX -> "powerZone+DMX";
@@ -2940,6 +3054,8 @@ format_product(Code) ->
 	    end
     end.
 
+format_value(Key, undefined) when is_atom(Key) -> 
+    "";
 format_value(serial,Value) when is_integer(Value) ->
     tl(integer_to_list(16#1000000+Value, 16));
 format_value(device,Value) when is_list(Value) ->
@@ -2985,6 +3101,15 @@ is_uart_item(invert) -> true;
 is_uart_item(status) -> true;
 is_uart_item(_) -> false.
 
+
+update_uart(U=#{ pos := Pos }, State) ->
+    case take_by_pos(Pos, State#state.uarts) of
+	false -> State;  %% not present ignore
+	{value,_Old,Us} ->
+	    State#state { uarts = [U|Us]}
+    end.
+
+
 %% find node with Serial
 take_node_by_serial(Serial, Ns) ->
     take_node_by_serial(Serial, Ns, []).
@@ -3028,6 +3153,23 @@ find_by_key(Key,Value,[M|Ms]) ->
     end;
 find_by_key(_Key, _Value, []) ->
     false.
+
+take_by_pos(Pos, List) ->
+    take_by_key(pos, Pos, List).
+
+take_by_key(Key, Value, List) ->
+    take_by_key(Key, Value, List, []).
+
+take_by_key(Key, Value, [M|List], Ms) ->
+    case M of
+	#{ Key := Value } ->
+	    {value,M,List++Ms};
+	_ ->
+	    take_by_key(Key, Value, List, [M|Ms])
+    end;
+take_by_key(_Key, _Value, [], _Ms) ->
+    false.
+
 
 load_firmware() ->
     Dir = code:priv_dir(gordon),
