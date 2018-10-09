@@ -7,7 +7,7 @@
 
 -module(gordon_keyboard).
 
--export([alpha/5, numeric/5]).    %% user widget
+-export([alpha/5, decimal/5, hexadecimal/5]).    %% user widget
 -compile(export_all).
 
 -record(keyb,
@@ -33,9 +33,17 @@
 %% epxy user type!
 %%
 
-numeric() ->
+dec() ->
     [ ["1","2","3","+"],
       ["4","5","6","-"],
+      ["7","8","9","BSP"],
+      ["0","RET"]
+    ].
+
+hex() ->
+    [ ["A","B","C","D"],
+      ["1","2","3","E"],
+      ["4","5","6","F"],
       ["7","8","9","BSP"],
       ["0","RET"]
     ].
@@ -61,11 +69,17 @@ alpha(select,Pos,W,Win,XY) -> keyboard_select(Pos,W,Win,XY);
 alpha(init,_What,W,_Win,_XY) ->
     keyboard_init(W, [{alpha,alpha()}, {numeric,alpha1()}]).
 
-numeric(draw,_Event,W,Win,XY) -> keyboard_draw(W,Win,XY);
-numeric(event,Event,W,Win,XY) -> keyboard_event(Event,W,Win,XY);
-numeric(select,Pos,W,Win,XY) ->  keyboard_select(Pos,W,Win,XY);
-numeric(init,_What,W,_Win,_XY) -> 
-    keyboard_init(W, [{numeric,numeric()}]).
+decimal(draw,_Event,W,Win,XY) -> keyboard_draw(W,Win,XY);
+decimal(event,Event,W,Win,XY) -> keyboard_event(Event,W,Win,XY);
+decimal(select,Pos,W,Win,XY) ->  keyboard_select(Pos,W,Win,XY);
+decimal(init,_What,W,_Win,_XY) ->
+    keyboard_init(W, [{numeric,dec()}]).
+
+hexadecimal(draw,_Event,W,Win,XY) -> keyboard_draw(W,Win,XY);
+hexadecimal(event,Event,W,Win,XY) -> keyboard_event(Event,W,Win,XY);
+hexadecimal(select,Pos,W,Win,XY) ->  keyboard_select(Pos,W,Win,XY);
+hexadecimal(init,_What,W,_Win,_XY) ->
+    keyboard_init(W, [{numeric,hex()}]).
 
 keyboard_init(W, Layout) ->
     U = keyboard_create(Layout),

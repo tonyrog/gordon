@@ -58,6 +58,7 @@ upload(Nid,Addr,Data,Bsize,Progress) ->
 	    end
     end.
 
+%% FIXME add retry
 blocks_upload(Nid,_Addr,<<>>,_Bsize,{L,_L0,Len},Progress) ->
     Progress(L/Len),
     co_sdo_cli:set(Nid,?INDEX_BOOT_APP_VSN,0,16#2F5EBD7A,1000);
