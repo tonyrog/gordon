@@ -43,7 +43,7 @@
 	  control => boolean(),
 	  control_swap => boolean(),
 	  control_inv => boolean(),
-	  status => idle | scan | error | ok,
+	  status => idle | scan | open | error | ok,
 	  lpc_type => integer(),         %% LPC device type
 	  lpc_info => [{atom(),term()}], %% LPC last scanned info
 	  hold => boolean(),
@@ -56,7 +56,8 @@
 	  id  => integer(),
 	  serial => integer(),
 	  vsn => {Major::integer(),Minor::integer()},
-	  product => atom(),
+	  product => integer(),
+	  creation => integer(),
 	  app_vsn => integer(),
 	  status => up | down | boot | flash | ok | error | free,
 	  activity => integer()        %% system time of last activity
@@ -226,12 +227,22 @@ init(Options) ->
     [{width,Qw},{height,Qh}] = epxy:get("qwerty", [width,height]),
     epxy:set("qwerty", [{x,(800-Qw) div 2}, {y,(480-Qh)}]),
 
-    epxy:new("numeric", [{type,user},{user,{gordon_keyboard,numeric,[]}},
-			 {hidden, true}, {disabled, true}, {last, true},
-			 {border,2}, {border_color, blue}
-			]),
-    [{width,Nw},{height,Nh}] = epxy:get("numeric", [width,height]),
-    epxy:set("numeric", [{x,(800-Nw) div 2}, {y,(480-Nh)}]),
+    epxy:new("decimal_keyboard", 
+	     [{type,user},{user,{gordon_keyboard,decimal,[]}},
+	      {hidden, true}, {disabled, true}, {last, true},
+	      {border,2}, {border_color, blue}
+	     ]),
+    [{width,Nw1},{height,Nh1}] = epxy:get("decimal_keyboard", [width,height]),
+    epxy:set("decimal_keyboard", [{x,(800-Nw1) div 2}, {y,(480-Nh1)}]),
+
+    epxy:new("hexadecimal_keyboard",
+	     [{type,user},{user,{gordon_keyboard,hexadecimal,[]}},
+	      {hidden, true}, {disabled, true}, {last, true},
+	      {border,2}, {border_color, blue}
+	     ]),
+    [{width,Nw2},{height,Nh2}]=epxy:get("hexadecimal_keyboard", [width,height]),
+    epxy:set("hexadecimal_keyboard", [{x,(800-Nw2) div 2}, {y,(480-Nh2)}]),
+
     UseVirtualKeyboard = proplists:get_value(use_virtual_keyboard, Env, false),
 
     %% define various layouts
@@ -397,21 +408,34 @@ handle_info({select,"uarts.r"++RTxt,#{event:=button_press}},State) ->
 					    selected_sff = undefined
 					  },
 		    show_pos(Tab,Pos,State2),
-		    State3 = refresh_uart_state(Uart,State2),
-		    {noreply, State3}
+		    refresh_uart_state(Uart,State2),
+		    {noreply, State2}
 	    end;
 	_ ->
 	    {noreply, State1}
     end;
 handle_info({menu,"ubt.product",#{event:=changed,value:=I}}, State) ->
-    case product(I) of
-	false -> 
-	    {noreply,State};
-	Value ->
-	    case State#state.selected_eff of
-		undefined ->
+    case find_node_by_pos(State) of
+	false -> {noreply, State};
+	Node ->
+	    Product = maps:get(product, Node, 0),
+	    Type = (Product bsr 16) band 16#ff,
+	    case product(I) of
+		false -> 
 		    {noreply,State};
-		CobId ->
+		Product -> %% nochange
+		    {noreply,State};
+		Value ->
+		    CobId = State#state.selected_eff,
+		    NewType = (Value bsr 16) band 16#ff,
+		    if Type =/= NewType ->
+			    Value1 = (maps:get(serial,Node,0) bsl 8) bor 
+				((Value bsr 16) band 16#ff),
+			    co_sdo_cli:send_sdo_set(CobId,?INDEX_BOOT_SERIAL,
+						    0,Value1);
+		       true  ->
+			    ok
+		    end,
 		    co_sdo_cli:send_sdo_set(CobId,?INDEX_BOOT_PRODUCT,
 					    0,Value),
 		    epxy:set("ubt.product", [{text,format_product(Value)}]),
@@ -419,21 +443,215 @@ handle_info({menu,"ubt.product",#{event:=changed,value:=I}}, State) ->
 		    Minor = Value band 16#ff,
 		    State1 = set_by_cobid(CobId,vsn,{Major,Minor},State),
 		    State2 = set_by_cobid(CobId,product,Value,State1),
-		    {noreply, State2}
+		    Node1 = Node#{ product => Product },
+		    State3 = update_node(Node1, State2),
+		    {noreply, State3}
 	    end
     end;
-handle_info({numeric_item,_ID,#{event:=focus_in}},State) ->    
+handle_info({menu,"ubt.uart.product",
+	     #{event:=changed,value:=I}},State) ->
+    case find_uart_by_pos(State) of
+	false -> {noreply, State};
+	#{ uart := undefined } -> {noreply, State};
+	Uart = #{ uart := U, ubt_info := Info, hold := true } ->
+	    Product = proplists:get_value(product,Info,0),
+	    Type = (Product bsr 16) band 16#ff,
+	    case product(I) of
+		false -> 
+		    {noreply,State};
+		Product -> %% nochange
+		    {noreply,State};
+		Value ->
+		    CobId = State#state.selected_eff,
+		    NewType = (Value bsr 16) band 16#ff,
+		    Info1 =
+			if Type =/= NewType ->
+				%% update serial with new type code
+				Serial = proplists:get_value(serial,Info,0),
+				Value1 = (Serial bsl 8) bor 
+				    ((Value bsr 16) band 16#ff),
+				Hex1 = integer_to_list(Value1,16),
+				uart_ubt_command(U,["serial 0x",Hex1]),
+				[{serial,Serial}|
+				 lists:keydelete(serial,1,Info)];
+			   true ->
+				Info
+			end,
+		    Hex = integer_to_list(Value,16),
+		    uart_ubt_command(U,["product 0x",Hex]),
+		    epxy:set("ubt.uart.product",
+			     [{text,format_product(Value)}]),
+		    Info2 = [{product,Product}|
+			     lists:keydelete(product,1,Info1)],
+		    Uart1 = Uart#{ product => Product },
+		    State1 = update_uart(Uart1, State),
+		    {noreply, State1}
+	    end
+    end;
+
+handle_info({decimal_item,_ID,#{event:=focus_in}},State) ->
     %% show numeric keyboard if requested
     if State#state.use_virtual_keyboard ->
-	    epxy:set("numeric", [{hidden,false}, {disabled,rest}]);
+	    epxy:set("decimal_keyboard", [{hidden,false}, {disabled,rest}]);
        true ->
 	    ok
     end,
     {noreply, State};
-handle_info({numeric_item,_ID,#{event:=focus_out}},State) ->
+handle_info({decimal_item,_ID,#{event:=focus_out}},State) ->
     %% hide numeric keyboard if requested
     if State#state.use_virtual_keyboard ->
-	    epxy:set("numeric", [{hidden,true}, {disabled,true}]);
+	    epxy:set("decimal_keyboard", [{hidden,true}, {disabled,true}]);
+       true ->
+	    ok
+    end,
+    {noreply, State};
+handle_info({decimal_item,"ubt.serial",#{event:=changed,value:=Text}},State) ->
+    case find_node_by_pos(State) of
+	false -> {noreply, State};
+	Node ->
+	    try list_to_integer(Text, 16) of
+		Serial ->
+		    Product = maps:get(product,Node,0),
+		    CobId = State#state.selected_eff,
+		    Value = (Serial bsl 8) bor ((Product bsr 16) band 16#ff),
+		    co_sdo_cli:send_sdo_set(CobId,?INDEX_BOOT_SERIAL,
+					    0,Value),
+		    Node1 = Node#{ serial=>Serial },
+		    State1 = update_node(Node1, State),
+		    {noreply, State1}
+	    catch
+		error:_ ->
+		    io:format("bad hex serial ~p\n", [Text]),
+		    {noreply, State}
+	    end
+    end;
+handle_info({decimal_item,"ubt.uart.serial",
+	     #{event:=changed,value:=Text}},State) ->
+    case find_uart_by_pos(State) of
+	false -> {noreply, State};
+	#{ uart := undefined } -> {noreply, State};
+	Uart = #{ uart := U, ubt_info := Info, hold := true } ->
+	    try list_to_integer(Text, 16) of
+		Serial ->
+		    Product = proplists:get_value(product,Info,0),
+		    Value = (Serial bsl 8) bor ((Product bsr 16) band 16#ff),
+		    HexValue = integer_to_list(Value,16),
+		    uart_ubt_command(U,["serial 0x",HexValue]),
+		    Info1 = [{serial,Serial}|lists:keydelete(serial, 1, Info)],
+		    Uart1 = Uart#{ ubt_info => Info1},
+		    State1 = update_uart(Uart1, State),
+		    refresh_uart_state(Uart,State1),
+		    {noreply, State1}
+	    catch
+		error:_ ->
+		    io:format("bad hex serial ~p\n", [Text]),
+		    {noreply, State}
+	    end;
+	_Uart ->
+	    io:format("Uart not in hold mode\n", []),
+	    {noreply, State}	    
+    end;
+
+handle_info({decimal_item,"ubt.creation",#{event:=changed,value:=Text}},State) ->
+    case find_node_by_pos(State) of
+	false -> {noreply, State};
+	Node ->
+	    try list_to_integer(Text, 10) of
+		Date10 ->
+		    Value = date10_to_utc_seconds(Date10),
+		    CobId = State#state.selected_eff,
+		    co_sdo_cli:send_sdo_set(CobId,?INDEX_BOOT_DATETIME,0,Value),
+		    Node1 = Node#{ creation=>Value },
+		    State1 = update_node(Node1, State),
+		    {noreply, State1}
+	    catch
+		error:_ ->
+		    io:format("bad hex serial ~p\n", [Text]),
+		    {noreply, State}
+	    end
+    end;
+handle_info({decimal_item,"ubt.uart.creation",
+	     #{event:=changed,value:=Text}},State) ->
+    case find_uart_by_pos(State) of
+	false -> {noreply, State};
+	#{ uart := undefined } -> {noreply, State};
+	Uart = #{ uart := U, ubt_info := Info, hold := true } ->
+	    try list_to_integer(Text, 10) of
+		Date10 ->
+		    Value = date10_to_utc_seconds(Date10),
+		    DecValue = integer_to_list(Value),
+		    uart_ubt_command(U,["datetime ",DecValue]),
+		    Info1 = [{creation,Value}|lists:keydelete(creation,1,Info)],
+		    Uart1 = Uart#{ ubt_info => Info1},
+		    State1 = update_uart(Uart1, State),
+		    refresh_uart_state(Uart,State1),
+		    {noreply, State1}
+	    catch
+		error:_ ->
+		    io:format("bad hex serial ~p\n", [Text]),
+		    {noreply, State}
+	    end;
+	_Uart ->
+	    io:format("Uart not in hold mode\n", []),
+	    {noreply, State}	    
+    end;
+
+handle_info({hexadecimal_item,"ubt.addr",#{event:=changed,value:=Text}},State) ->
+    case find_node_by_pos(State) of
+	false -> {noreply, State};
+	Node ->
+	    try list_to_integer(Text, 16) of
+		Value ->
+		    CobId = State#state.selected_eff,
+		    co_sdo_cli:send_sdo_set(CobId,?INDEX_BOOT_APP_ADDR,
+					    0,Value),
+		    Node1 = Node#{ app_addr=>Value },
+		    State1 = update_node(Node1, State),
+		    {noreply, State1}
+	    catch
+		error:_ ->
+		    io:format("bad hex app_addr ~p\n", [Text]),
+		    {noreply, State}
+	    end
+    end;
+handle_info({hexadecimal_item,"ubt.uart.addr",
+	     #{event:=changed,value:=Text}},State) ->
+    case find_uart_by_pos(State) of
+	false -> {noreply, State};
+	#{ uart := undefined } -> {noreply, State};
+	Uart = #{ uart := U, ubt_info := Info, hold := true } ->
+	    try list_to_integer(Text, 16) of
+		Value ->
+		    HexValue = integer_to_list(Value,16),
+		    uart_ubt_command(U,["addr 0x",HexValue]),
+		    Info1 = [{app_addr,Value}|
+			     lists:keydelete(app_addr,1,Info)],
+		    Uart1 = Uart#{ ubt_info => Info1},
+		    State1 = update_uart(Uart1, State),
+		    refresh_uart_state(Uart,State1),
+		    {noreply, State1}
+	    catch
+		error:_ ->
+		    io:format("bad hex addr ~p\n", [Text]),
+		    {noreply, State}
+	    end;
+	_Uart ->
+	    io:format("Uart not in hold mode\n", []),
+	    {noreply, State}	    
+    end;
+
+handle_info({hexadecimal_item,_ID,#{event:=focus_in}},State) ->
+    %% show numeric keyboard if requested
+    if State#state.use_virtual_keyboard ->
+	    epxy:set("hexadecimal_keyboard", [{hidden,false}, {disabled,rest}]);
+       true ->
+	    ok
+    end,
+    {noreply, State};
+handle_info({hexadecimal_item,_ID,#{event:=focus_out}},State) ->
+    %% hide numeric keyboard if requested
+    if State#state.use_virtual_keyboard ->
+	    epxy:set("hexadecimal_keyboard", [{hidden,true}, {disabled,true}]);
        true ->
 	    ok
     end,
@@ -576,7 +794,7 @@ handle_info({button,[_,_,_|".save"],#{event:=button_press}},State) ->
 handle_info({button,[_,_,_|".restore"],#{event:=button_press}},State) ->
     {noreply, action_sdo(State,up,?IX_RESTORE_DEFAULT_PARAMETERS,1,<<"daol">>)};
 
-handle_info({button,"uart.lpc_open",#{event:=button_press}},State) ->
+handle_info({button,"uart.lpc_sync",#{event:=button_press}},State) ->
     case find_uart_by_pos(State#state.selected_tab,
 			  State#state.selected_pos,
 			  State#state.uarts) of
@@ -584,78 +802,44 @@ handle_info({button,"uart.lpc_open",#{event:=button_press}},State) ->
 	    {noreply,State};
 	Uart = #{ pos := I, uart := undefined, device := Device } ->
 	    Baud = maps:get(baud,Uart,38400),
-	    Control = maps:get(control,Uart,false),
-	    ControlSwap = maps:get(control_swap,Uart,false),
-	    ControlInv = maps:get(control_inv,Uart,false),
-	    put(control, Control),
-	    put(control_swap, ControlSwap),
-	    put(control_inv, ControlInv),
-	    set_uart_status(I,sync),
 	    io:format("open device ~s @ ~w baud\n", [Device, Baud]),
 	    case elpcisp:open(Device, Baud) of
 		{ok,U} ->
-		    case elpcisp:sync_osc(U, 4, 1000, "12000") of
-			{ok,_} ->
-			    case elpcisp:read_device_type(U) of
-				{ok,DevType} ->
-				    Info = elpcisp:info(U),
-				    set_uart_status(I,open),
-				    Uart1 = Uart#{ uart=>U,
-						   lpc_info=>Info,
-						   lpc_type=>DevType },
-				    refresh_uart_state(Uart1, State),
-				    State1 = update_uart(Uart1, State),
-				    {noreply, State1};
-				_Error ->
-				    elpcisp:close(U),
-				    ?dbg("elpcisp read error ~p\n", [_Error]),
-				    set_uart_status(I,error),
-				    {noreply, State}
-			    end;
-			_Error ->
-			    elpcisp:close(U),
-			    ?dbg("elpcisp read error ~p\n", [_Error]),
-			    set_uart_status(I,error),
-			    set_lpc_info([]),
-			    {noreply, State}
-		    end;
+		    State1 = uart_sync(Uart#{ uart := U}, State),
+		    {noreply, State1};
 		_Error ->
 		    ?dbg("elpcisp open error ~p\n", [_Error]),
 		    set_uart_status(I,error),
 		    set_lpc_info([]),
 		    {noreply, State}
 	    end;
-	Uart = #{ pos :=I, uart := U } when is_port(U) ->
-	    DevType = case elpcisp:read_device_type(U) of
-			  {ok,DT} -> DT;
-			  _ -> undefined
-		      end,
-	    set_uart_status(I,open),
-	    Info = elpcisp:info(U),
-	    Uart1 = Uart#{ lpc_info=>Info,
-			   lpc_type=>DevType },
-	    refresh_uart_state(Uart1, State),
-	    State1 = update_uart(Uart1, State),
+	Uart = #{ uart := U } when is_port(U) ->
+	    State1 = uart_sync(Uart, State),
 	    {noreply, State1}
     end;
 
 handle_info({button,"uart.lpc_flash",#{event:=button_press}},State) ->
+    ?dbg("FLASH\n",[]),
     case lists:keyfind(ihex,1,State#state.firmware) of
 	{ihex,Firmware} ->
+	    ?dbg("elpcisp flash firmware size ~p\n", 
+		 [firmware_size(Firmware)]),
 	    case find_uart_by_pos(State#state.selected_tab,
 				  State#state.selected_pos,
 				  State#state.uarts) of
 		false ->
 		    {noreply, State};
-		#{ pos := I, uart := U, baud := Baud,
-			  dev_type := DevType } when is_port(U) ->
+		#{ pos := I, uart := U, baud := Baud, lpc_type := DevType } 
+		  when is_port(U) ->
+		    ?dbg("DevType = ~p\n",[DevType]),
 		    case elpcisp:unlock(U) of
 			{ok,_} ->
-			    elpcisp:flash_set_baudrate(U,Baud),
+			    ?dbg("Unlock ok\n",[]),
+			    elpcisp:set_baud_rate(U,Baud,1),
 			    set_uart_status(I,flash),
-			    case flash_firmware(U, Firmware, DevType) of
+			    case flash_firmware(U, I, Firmware, DevType) of
 				ok ->
-				    set_uart_status(I,open);
+				    set_uart_status(I,sync);
 				_Error ->
 				    ?dbg("elpcisp flash error ~p\n", [_Error]),
 				    set_uart_status(I,error)
@@ -682,7 +866,7 @@ handle_info({button,"uart.lpc_go",#{event:=button_press}},State) ->
 	    {noreply, State};
 	#{ pos := I, uart := U } ->
 	    case elpcisp:go(U, 0) of
-		{ok,_} -> set_uart_status(I,open);
+		{ok,_} -> set_uart_status(I,idle);
 		_Error -> set_uart_status(I,error)
 	    end,
 	    {noreply, State}
@@ -697,7 +881,7 @@ handle_info({button,"uart.lpc_reset",#{event:=button_press}},State) ->
 	    {noreply, State};
 	#{ pos := I, uart := U } ->	
 	    case elpcisp:reset(U) of
-		{ok,_} -> set_uart_status(I,open);
+		{ok,_} -> set_uart_status(I,idle);
 		_Error -> set_uart_status(I,error)
 	    end,
 	    {noreply, State}
@@ -716,7 +900,7 @@ handle_info({button,"uart.ubt.hold",#{event:=button_press}},State) ->
 		true ->
 		    io:format("HOLD=already\n"),
 		    set_uart_status(I,hold),
-		    Info = collect_uart_info(U),
+		    Info = uart_ubt_info(U),
 		    Uart1 = Uart#{ hold=>true, ubt_info=>Info },
 		    refresh_uart_state(Uart1, State),
 		    State1 = update_uart(Uart1, State),
@@ -729,7 +913,7 @@ handle_info({button,"uart.ubt.hold",#{event:=button_press}},State) ->
 			true ->
 			    io:format("HOLD=true\n"),
 			    set_uart_status(I,hold),
-			    Info = collect_uart_info(U),
+			    Info = uart_ubt_info(U),
 			    Uart1 = Uart#{ hold=>true, ubt_info=>Info },
 			    refresh_uart_state(Uart1, State),
 			    State1 = update_uart(Uart1, State),
@@ -754,7 +938,7 @@ handle_info({button,"uart.ubt.go",#{event:=button_press}},State) ->
 	#{ uart := undefined } ->
 	    {noreply, State};
 	Uart = #{ pos := I, uart := U, hold := true } when is_port(U) ->
-	    uart:send(U, "go\n"),
+	    uart_ubt_command(U, "go"),
 	    set_uart_status(I,open),
 	    Uart1 = Uart#{ hold=>false },
 	    State1 = update_uart(Uart1, State),
@@ -771,7 +955,7 @@ handle_info({button,"uart.ubt.reset",#{event:=button_press}},State) ->
 	#{ uart := undefined } ->
 	    {noreply, State};
 	Uart = #{ pos := I, uart := U, hold := true } when is_port(U) ->
-	    uart:send(U, "reset\n"),
+	    uart_ubt_command(U, "reset"),
 	    Uart1 = Uart#{ hold=>false },
 	    set_uart_status(I,open),
 	    State1 = update_uart(Uart1, State),
@@ -825,6 +1009,31 @@ handle_info({timeout,Timer,echo_timeout}, State)
     EchoTimer = erlang:start_timer(?ECHO_INTERVAL, self(), echo_timeout),
     {noreply, State1#state { echo_timer = EchoTimer }};
 
+handle_info({uart_error,U,Reason}, State) ->
+    case take_by_key(uart, U, State#state.uarts) of
+	false ->
+	    lager:warning("uart error ~p unknown device", 
+			  [Reason]),
+	    {noreply, State};
+	Uart = #{ device := Device } ->
+	    if Reason =:= enxio ->
+		    lager:error("uart error ~p device ~s unplugged?", 
+				[Reason,Device]);
+	       true ->
+		    lager:error("uart error ~p for device ~s", 
+				[Reason,Device])
+	    end,
+	    elpcisp:close(U),
+	    Uart1 = Uart#{ uart => undefined,
+			   status => idle,
+			   lpc_info => [],
+			   ubt_info => [],
+			   hold => false },
+	    refresh_uart_state(Uart1, State),
+	    State1 = update_uart(Uart1, State),
+	    {noreply, State1}
+    end;
+
 handle_info(_Info, State) ->
     io:format("gordon_view: got info ~p\n", [_Info]),
     {noreply, State}.
@@ -858,50 +1067,89 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
+%% try syncronize the uart
+uart_sync(Uart=#{ uart:=U, pos:=I}, State) ->
+    put(control, maps:get(control,Uart,false)),
+    put(control_swap, maps:get(control_swap,Uart,false)),
+    put(control_inv, maps:get(control_inv,Uart,false)),
+    set_uart_status(I,sync),
+    case elpcisp:sync_osc(U, 4, 1000, "12000") of
+	{ok,_} ->
+	    case elpcisp:read_device_type(U) of
+		{ok,DevType} ->
+		    Info = elpcisp:info(U),
+		    Uart1 = Uart#{ uart=>U,
+				   status=>sync,
+				   hold=>false,
+				   lpc_info=>Info,
+				   ubt_info=>[],
+				   lpc_type=>DevType },
+		    refresh_uart_state(Uart1, State),
+		    update_uart(Uart1, State);
+		_Error ->
+		    elpcisp:close(U),
+		    ?dbg("elpcisp read error ~p\n", [_Error]),
+		    set_uart_status(I,error),
+		    Uart1 = Uart#{ uart=>undefined,
+				   status=>error,
+				   hold=>false,
+				   lpc_info=>[],
+				   ubt_info=>[],
+				   lpc_type=>0 },
+		    update_uart(Uart1, State)
+	    end;
+	_Error ->
+	    elpcisp:close(U),
+	    ?dbg("elpcisp read error ~p\n", [_Error]),
+	    set_uart_status(I,error),
+	    Uart1 = Uart#{ uart=>undefined,
+			   status=>error,
+			   hold=>false,
+			   lpc_info=>[],
+			   ubt_info=>[],
+			   lpc_type=>0 },
+	    update_uart(Uart1, State)
+    end.
+
 %% we sent show vsn lookup 0x1234abcd
 detect_uart_hold(U, Timeout) ->
-    uart:send(U, "show vsn\n"),
-    detect_uart_hold_(U, Timeout).
+    uart_ubt_command(U, "show vsn"),
+    uart_ubt_detect_hold_(U, Timeout).
 
-detect_uart_hold_(U, Timeout) ->
+uart_ubt_detect_hold_(U, Timeout) ->
     receive
-	{uart, U, <<">", Command/binary>>} ->
-	    io:format("FLUSH >~p\n", [Command]),
-	    detect_uart_hold_(U, Timeout);
+	{uart, U, <<">", _Echo/binary>>} ->
+	    io:format("FLUSH >~p\n", [_Echo]),
+	    uart_ubt_detect_hold_(U, Timeout);
 	{uart, U, <<"0x", Vsn/binary>>} ->
 	    io:format("VSN = ~p\n", [Vsn]),
 	    true;
-	{uart, U, Data} ->
-	    io:format("FLUSH ~p\n", [Data]),
-	    detect_uart_hold_(U, Timeout)
+	{uart, U, _Data} ->
+	    io:format("FLUSH ~p\n", [_Data]),
+	    uart_ubt_detect_hold_(U, Timeout)
     after
 	Timeout -> false
     end.
 
-collect_uart_info(U) ->
-    Serial   = uart_read_num(U, "serial"),
-    Product  = uart_read_num(U, "product"),
-    Datetime = uart_read_num(U, "datetime"),
-    AppAddr  = uart_read_num(U, "addr"),
-    AppVsn   = uart_read_num(U, "vsn"),
-    io:format("Serial = ~8.16.0B\n", [Serial]),
-    io:format("Product = ~8.16.0B\n", [Product]),
-    io:format("Datetime = ~w\n", [Datetime]),
-    io:format("AppAddr = ~8.16.0B\n", [AppAddr]),
-    io:format("AppVsn = ~8.16.0B\n", [AppVsn]),
+uart_ubt_info(U) ->
+    Serial   = uart_ubt_read_num(U, "serial"),
+    Product  = uart_ubt_read_num(U, "product"),
+    Datetime = uart_ubt_read_num(U, "datetime"),
+    AppAddr  = uart_ubt_read_num(U, "addr"),
+    AppVsn   = uart_ubt_read_num(U, "vsn"),
     [{serial,(Serial bsr 8)},{product,Product},
      {datetime,Datetime},{app_addr, AppAddr},
      {app_vsn,AppVsn}].
 
-uart_read_num(U, Item) ->
-    uart:send(U, "show "++Item++"\n"),
-    uart_recv_num(U, 1000).
+uart_ubt_read_num(U, Item) ->
+    uart_ubt_command(U, ["show"," ",Item]),
+    uart_ubt_recv_num(U, 1000).
 
-uart_recv_num(U, Timeout) ->
+uart_ubt_recv_num(U, Timeout) ->
     receive
-	{uart, U, <<">", Command/binary>>} ->
-	    io:format("FLUSH COMMAND ~p\n", [Command]),
-	    uart_recv_num(U, Timeout);
+	{uart, U, <<">", _Echo/binary>>} ->
+	    io:format("FLUSH COMMAND ~p\n", [_Echo]),
+	    uart_ubt_recv_num(U, Timeout);
 	{uart, U, (<<"0x",Hex/binary>>)} ->
 	    Num = string:trim(binary_to_list(Hex)),
 	    %% io:format("HEX = ~p\n", [Num]),
@@ -920,9 +1168,22 @@ uart_recv_num(U, Timeout) ->
 	    end;
 	{uart, U, _Data} ->
 	    %% io:format("FLUSH ~p\n", [Data]),
-	    uart_recv_num(U, Timeout)
+	    uart_ubt_recv_num(U, Timeout)
     after
 	Timeout -> -1
+    end.
+
+uart_ubt_command(U, Command) ->
+    uart_ubt_command(U, Command, 250).
+
+uart_ubt_command(U, Command, Timeout) ->
+    uart:send(U, [Command,$\n]),
+    %% try flush the echo output
+    receive
+	{uart, U, <<">", _Echo/binary>>} ->
+	    ok
+    after Timeout ->
+	    ok
     end.
 
 %% Product menu
@@ -1005,7 +1266,7 @@ set_uart_ubt_info(Info) ->
     AppVsn   = proplists:get_value(app_vsn,Info),
     epxy:set("uart.ubt.app_vsn", [{text,format_value(app_vsn,AppVsn)}]),
     epxy:set("uart.ubt.serial", [{text,format_value(serial,Serial)}]),
-    epxy:set("uart.ubt.product", [{text,format_product(Product)}]),
+    set_product_menu("uart.ubt.product", Product),
     epxy:set("uart.ubt.creation", [{text,format_date(Creation)}]),
     epxy:set("uart.ubt.addr", [{text,format_value(app_addr,AppAddr)}]),
     ok.
@@ -1108,8 +1369,7 @@ refresh_node_state(SID, Node, State) ->
 	    Product = maps:get(product, Node, 0),
 	    case SID of
 		"ubt" ->
-		    I = product_by_value(Product),
-		    epxy:set(SID++".product", [{value,I}]);
+		    set_product_menu("ubt.product", Product);
 		_ ->
 		    epxy:set(SID++".product", [{text,format_product(Product)}])
 	    end,
@@ -1146,25 +1406,27 @@ refresh_uart_state(SID, Uart, State) ->
     case Uart of
 	#{ uart := U, lpc_info := LpcInfo, ubt_info := UbtInfo } 
 	  when is_port(U) ->
-	    case lists:keyfind(ihex,1,State#state.firmware) of
-		{ihex,_Firmware} ->
-		    enable_buttons(SID,  ["lpc_flash"]);
-		_ ->
-		    disable_buttons(SID,  ["lpc_flash"])
-	    end,
-	    enable_buttons(SID,  ["lpc_reset", "lpc_go"]),
-	    disable_buttons(SID, ["lpc_open"]),
-	    enable_buttons("uart.ubt", ["hold"]),
+	    enable_buttons(SID, ["lpc_sync", "lpc_reset"]),
 	    case maps:get(hold, Uart, false) of
 		true ->
+		    disable_buttons(SID,  ["lpc_go", "lpc_flash"]),
+		    disable_buttons("uart.ubt", ["hold"]),
 		    enable_buttons("uart.ubt", ["go", "reset"]);
 		false ->
+		    enable_buttons(SID,  ["lpc_go"]),
+		    case lists:keyfind(ihex,1,State#state.firmware) of
+			{ihex,_Firmware} ->
+			    enable_buttons(SID,  ["lpc_flash"]);
+			_ ->
+			    disable_buttons(SID,  ["lpc_flash"])
+		    end,
+		    enable_buttons("uart.ubt", ["hold"]),
 		    disable_buttons("uart.ubt", ["go", "reset"])
 	    end,
 	    set_lpc_info(LpcInfo),
 	    set_uart_ubt_info(UbtInfo);
 	#{ lpc_info := LpcInfo, ubt_info := UbtInfo } ->
-	    enable_buttons(SID,  ["lpc_open"]),
+	    enable_buttons(SID,  ["lpc_sync"]),
 	    disable_buttons(SID, ["lpc_go", "lpc_flash", "lpc_reset"]),
 	    disable_buttons("uart.ubt", ["hold", "go", "reset"]),
 	    set_lpc_info(LpcInfo),
@@ -1323,7 +1585,7 @@ event(Signal,ID,Env) ->
     ?SERVER ! {Signal,ID,Env}.
 
 %% Filter callback
-event_filter(filter,Event,_Widget,_Window,_XY,dec) ->
+event_filter(filter,Event,_Widget,_Window,_XY,decimal) ->
     Valid = [$\r,$\e,$\t,$\b,$0,$1,$2,$3,$4,$5,$5,$6,$7,$8,$9],
     case Event of
 	{key_press,Sym,_Mode,_Code} ->
@@ -1333,7 +1595,7 @@ event_filter(filter,Event,_Widget,_Window,_XY,dec) ->
 	_ ->
 	    true
     end;
-event_filter(filter,Event,_Widget,_Window,_XY,hex) ->
+event_filter(filter,Event,_Widget,_Window,_XY,hexadeicmal) ->
     Valid = [$\r,$\e,$\t,$\b,$0,$1,$2,$3,$4,$5,$5,$6,$7,$8,$9,
 	     $a,$b,$c,$d,$e,$f,$A,$B,$C,$D,$E,$F],
     case Event of
@@ -1665,7 +1927,7 @@ bridgeZone(X,Y,_W,_H) ->
     ID = "pdb",
 
     {X11,Y1,_W0,H0} = tagged_text("pdb.app_vsn", "Version", X1, Y0, 0),
-    {_,_,_,_} = tagged_text("pdb.uapp_vsn", "Updgrade", X11+XGap, Y0, 0),
+    {_,_,_,_} = tagged_text("pdb.uapp_vsn", "Upgrade", X11+XGap, Y0, 0),
 
     %% Aout x 2 (row=Y1,column X1)
     {_,Y2,W1,H1} = aout_group("pdb.aout", 5, 6, X1, Y1+YGap),
@@ -1795,15 +2057,21 @@ uBoot(X,Y,_W,_H) ->
     {_,_,W00,_} = tagged_text("ubt.uapp_vsn", "Upgrade", X11+XGap, Y0, 0),
 
     {_,Y2,W1,H1} = edit_text("ubt.serial", "Serial", X1, Y1+YGap, TW),
-    epxy:set("ubt.serial", [{filter,{?MODULE,event_filter,[dec]}}]),
-    epxy:add_callback("ubt.serial",numeric_item,?MODULE),
+    epxy:set("ubt.serial", [{max_length,6},
+			    {filter,{?MODULE,event_filter,[decimal]}}]),
+    epxy:add_callback("ubt.serial",decimal_item,?MODULE),
 
     {_,Y3,W2,H2} = product_menu("ubt.product", "Product", X1, Y2+YGap, TW),
 
     {_,Y4,W3,H3} = edit_text("ubt.creation", "Creation", X1, Y3+YGap, TW),
+    epxy:set("uart.ubt.creation", [{max_length,6},
+				   {filter,{?MODULE,event_filter,[decimal]}}]),
+    epxy:add_callback("uart.ubt.creation",decimal_item,?MODULE),
+
     {_,Y5,W4,H4} = edit_text("ubt.addr", "Address", X1, Y4+YGap, TW),
-    epxy:set("ubt.addr", [{filter,{?MODULE,event_filter,[hex]}}]),
-    epxy:add_callback("ubt.addr",numeric_item,?MODULE),
+    epxy:set("ubt.addr", [{max_length,8},
+			  {filter,{?MODULE,event_filter,[hexadecimal]}}]),
+    epxy:add_callback("ubt.addr",hexadecimal_item,?MODULE),
 
     {W5,H5} = add_uboot_buttons(ID, X1, Y5+YGap),
 
@@ -1822,7 +2090,7 @@ uBoot(X,Y,_W,_H) ->
 %% maxCopySize
 %% variant
 %%
-%% Also lpc.ubt
+%% Also uart.ubt
 %% hold uboot by sending a number (0.5s interval) of \n 
 %% after reset. (wait for ">")
 %% then send serial commands to set
@@ -1839,10 +2107,41 @@ uartBoot(X,Y,_W,_H) ->
     XOffs = 4,
     XGap = ?TOP_XGAP,
     YGap = ?GROUP_FONT_SIZE,
-    Y0 = YGap,
-    X1 = XGap,
     TW = 96,
-    {_,Y1,W0,H0} = tagged_text("uart.vsn", "Version", X1, Y0, TW),
+    X1 = XGap,
+
+    YY0 = YGap,
+    XX0 = XGap,
+    {_,YY1,WW0,HH0} = tagged_text("uart.ubt.app_vsn","Version",X1,YY0,TW),
+
+    {_,YY2,WW1,HH1} = edit_text("uart.ubt.serial","Serial", X1, YY1+YGap, TW),
+    epxy:set("uart.ubt.serial", [{max_length,6},
+				 {filter,{?MODULE,event_filter,[decimal]}}]),
+    epxy:add_callback("uart.ubt.serial",decimal_item,?MODULE),
+
+    {_,YY3,WW2,HH2} = product_menu("uart.ubt.product","Product",X1,YY2+YGap,TW),
+
+    {_,YY4,WW3,HH3} = edit_text("uart.ubt.creation","Creation",X1,YY3+YGap,TW),
+    epxy:set("uart.ubt.creation", [{max_length,6},
+				   {filter,{?MODULE,event_filter,[decimal]}}]),
+    epxy:add_callback("uart.ubt.creation",decimal_item,?MODULE),
+
+    {_,YY5,WW4,HH4} = edit_text("uart.ubt.addr","Address",X1,YY4+YGap,TW),
+    epxy:set("uart.ubt.addr", [{max_length,8},
+			       {filter,{?MODULE,event_filter,[hexadecimal]}}]),
+    epxy:add_callback("uart.ubt.addr",hexadecimal_item,?MODULE),
+
+    {WW5,HH5} = add_urt_buttons("uart.ubt", XX0, YY5+YGap),
+
+    WWt = XGap+lists:max([WW0,WW1,WW2,WW3,WW4,WW5])+XGap+XOffs*2,
+    HHt = YGap+lists:sum([HH0,HH1,HH2,HH3,HH4,HH5])+5*YGap,
+
+    Y0 = YGap+?TOP_YGAP,
+    H8 = HHt,
+    group_rectangle("uart.ubt","uBoot",X1,Y0,WWt,H8,false),
+
+    Y11 = Y0+H8+YGap,
+    {_,Y1,W0,H0} = tagged_text("uart.vsn", "Version", X1, Y11, TW),
     {_,Y2,W1,H1} = tagged_text("uart.product", "Product", X1, Y1+YGap, TW),
     {_,Y3,W2,H2} = tagged_text("uart.flashSize", "FlashSize", X1, Y2+YGap, TW),
     {_,Y4,W3,H3} = tagged_text("uart.ramSize", "RamSize", X1, Y3+YGap, TW),
@@ -1850,32 +2149,13 @@ uartBoot(X,Y,_W,_H) ->
     {_,Y6,W5,H5} = tagged_text("uart.maxCopySize", "MaxCopySize",X1,Y5+YGap,TW),
     {_,Y7,W6,H6} = tagged_text("uart.variant", "Variant", X1, Y6+YGap,TW),
     {W7,H7} = add_lpc_buttons("uart", X1, Y7+YGap),
-    Y8 = Y7+YGap+H7,
 
     Wt = XGap+lists:max([W0,W1,W2,W3,W4,W5,W6,W7])+XGap,
     Ht = YGap+lists:sum([H0,H1,H2,H3,H4,H5,H6,H7])+8*YGap,
 
-    %% FIXME: this group is hidden when product is powerZone+DMX
-    %%        since UART is not initialized 
-    YY0 = YGap,
-    XX0 = XGap,
-    {_,YY1,WW0,HH0} = tagged_text("uart.ubt.app_vsn","Version",X1,YY0,TW),
-
-    {_,YY2,WW1,HH1} = edit_text("uart.ubt.serial","Serial", X1, YY1+YGap, TW),
-    epxy:set("uart.ubt.serial", [{filter,{?MODULE,event_filter,[dec]}}]),
-
-    {_,YY3,WW2,HH2} = edit_text("uart.ubt.product","Product",X1,YY2+YGap,TW),
-    {_,YY4,WW3,HH3} = edit_text("uart.ubt.creation","Creation",X1,YY3+YGap,TW),
-    {_,YY5,WW4,HH4} = edit_text("uart.ubt.addr","Address",X1,YY4+YGap,TW),
-    epxy:set("uart.ubt.addr", [{filter,{?MODULE,event_filter,[hex]}}]),
-    {WW5,HH5} = add_urt_buttons("uart.ubt", XX0, YY5+YGap),
-
-    WWt = XGap+lists:max([WW0,WW1,WW2,WW3,WW4,WW5])+XGap+XOffs*2,
-    HHt = YGap+lists:sum([HH0,HH1,HH2,HH3,HH4,HH5])+6*YGap,
-
-    group_rectangle("uart.ubt","uBoot",X1,Y8,WWt,HHt,false),
-
-    group_rectangle("uart","lpcBoot",X,Y,max(Wt,WWt),Ht+HHt,all),
+    W9 = max(Wt,WWt),
+    H9 = Ht+HHt+?TOP_YGAP,
+    group_rectangle("uart","lpcBoot",X,Y,W9,H9,all),
 
     ok.
 
@@ -1893,7 +2173,7 @@ add_lpc_buttons(ID, X, Y) ->
     add_text_button(ID++".lpc_go",      "Go",      X0, Y0, W, H),
     add_text_button(ID++".lpc_flash",   "Flash",   X1, Y0, W, H),
     add_text_button(ID++".lpc_reset",   "Reset",   X2, Y0, W, H),
-    add_text_button(ID++".lpc_open",    "Open",    X3, Y0, W, H),
+    add_text_button(ID++".lpc_sync",    "Sync",    X3, Y0, W, H),
     {4*W+4*XGap,1*H+1*YGap}.
 
 %% add hold and go buttons
@@ -2311,11 +2591,12 @@ tagged_text(ID,TagText,X,Y,TagWidth,Disabled,Edit) ->
 	      {x,X+XOffs},{y,Y},
 	      {height,Ht}, {width,W}
 	     ]),
-    BorderColor = if Edit -> blue; true -> black end,
+    BorderColor = if Edit -> blue; true -> lightgray end,
     epxy:new(ID++".border",
 	     [{type,rectangle},
 	      {disabled, true},
-	      {color,BorderColor},
+	      {border,1},
+	      {border_color,BorderColor},
 	      {x,-1},{y,-1},
 	      {width,W+2},{height,H+2}]),
     epxy:new(ID++".tag",
@@ -2499,10 +2780,7 @@ node_started(_CobId, Serial, State) ->
     spawn(
       fun() ->
 	      CobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
-	      ?dbg("CobId = ~8.16.0B\n", [CobId]),
-	      co_sdo_cli:send_sdo_get(CobId, ?INDEX_ID, 0),
-	      co_sdo_cli:send_sdo_get(CobId, ?IX_IDENTITY_OBJECT, ?SI_IDENTITY_PRODUCT)
-	      %% ...
+	      request_node_info(CobId, false)
       end),
     State2 = refresh_node_state(State1),
     {noreply,State2}.
@@ -2514,25 +2792,29 @@ node_running(_CobId, Serial, State) ->
 	    spawn(
 	      fun() ->
 		      CobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
-		      ?dbg("CobId = ~8.16.0B\n", [CobId]),
-		      co_sdo_cli:send_sdo_get(CobId, ?INDEX_ID, 0),
-		      co_sdo_cli:send_sdo_get(CobId, ?IX_IDENTITY_OBJECT,
-					      ?SI_IDENTITY_PRODUCT),
-		      co_sdo_cli:send_sdo_get(CobId, ?IX_IDENTITY_OBJECT,
-					      ?SI_IDENTITY_REVISION),
-		      co_sdo_cli:send_sdo_get(CobId, ?INDEX_BOOT_APP_VSN, 0),
-		      co_sdo_cli:send_sdo_get(CobId, ?INDEX_BOOT_APP_ADDR, 0),
-		      co_sdo_cli:send_sdo_get(CobId, ?INDEX_BOOT_VSN, 0),
-		      if CobId =:= State#state.selected_eff ->
-			      send_pdo1_tx(0, ?MSG_REFRESH, 0, 0);
-			 true ->
-			      ok
-		      end
+		      request_node_info(CobId,
+					CobId =:= State#state.selected_eff)
 	      end),
 	    {noreply, State};
 	{value,N,Ns} ->
 	    Now = erlang:system_time(micro_seconds),
 	    {noreply, State#state { nodes=[N#{activity=>Now}|Ns] }}
+    end.
+
+request_node_info(CobId, Refresh) ->
+    ?dbg("request_node_info CobId = ~8.16.0B\n", [CobId]),
+    co_sdo_cli:send_sdo_get(CobId, ?INDEX_ID, 0),
+    co_sdo_cli:send_sdo_get(CobId, ?IX_IDENTITY_OBJECT,
+			    ?SI_IDENTITY_PRODUCT),
+    co_sdo_cli:send_sdo_get(CobId, ?IX_IDENTITY_OBJECT,
+			    ?SI_IDENTITY_REVISION),
+    co_sdo_cli:send_sdo_get(CobId, ?INDEX_BOOT_APP_VSN, 0),
+    co_sdo_cli:send_sdo_get(CobId, ?INDEX_BOOT_APP_ADDR, 0),
+    co_sdo_cli:send_sdo_get(CobId, ?INDEX_BOOT_VSN, 0),
+    if Refresh ->
+	    send_pdo1_tx(0, ?MSG_REFRESH, 0, 0);
+       true ->
+	    ok
     end.
 
 node_message(CobID, Index, Si, Value, State) ->
@@ -2795,7 +3077,7 @@ node_activity_([N=#{pos := Pos,activity := Then,status := Status}|Ns],
 	    set_text(vsn,Pos,""),
 	    set_text(status,Pos,free),
 	    Acc1 = [N#{status=>free,serial=>0,id=>0,
-		       product=>undefined,vsn=>0}|Acc],
+		       product=>0,vsn=>0}|Acc],
 	    if Pos =:= State#state.selected_pos ->
 		    State1 = deselect_row(State#state.selected_tab,
 					  State#state.selected_pos,State),
@@ -2997,6 +3279,10 @@ free_nodes_([],Free,Taken) ->
     Free1=lists:sort(fun(A,B) -> maps:get(pos,A) < maps:get(pos,B) end, Free),
     {Free1,Taken}.
 
+set_product_menu(Item, Product) ->
+    I = product_by_value(Product),
+    epxy:set(Item, [{value,I}]).
+
 %% set text value in nodes table
 %% nodes.r<pos>.<key>
 set_text(Key,Pos,Value) ->
@@ -3019,16 +3305,26 @@ set_uart_text(Key,Pos,Value) ->
 	    ok
     end.
 
+%% given
+date10_to_utc_seconds(Date10) ->
+    Month = max(1,min((Date10 div 100) rem 100, 12)),
+    Year  = ((Date10 div 10000) rem 100)+2000,
+    MaxDay = calendar:last_day_of_the_month(Year, Month),
+    Day = max(1,min(Date10 rem 100, MaxDay)),
+    Gs = calendar:datetime_to_gregorian_seconds({{Year,Month,Day},{0,0,0}}),
+    Gs - 62167219200.
+
 format_hex32(Value) when is_integer(Value) ->
     tl(integer_to_list(16#100000000+Value, 16)).
 
 format_date(undefined) -> 
     "";
 format_date(Value) when is_integer(Value) ->
-    {{Year,Mon,Day},{_H,_M,_S}} = 
-	calendar:gregorian_seconds_to_datetime(Value+62167219200),
-    lists:flatten(io_lib:format("~4..0w-~2..0w-~2..0w", 
-				[Year,Mon,Day])).
+    Date = calendar:gregorian_seconds_to_datetime(Value+62167219200),
+    format_date(Date);
+format_date({{Year,Mon,Day},{_H,_M,_S}}) ->
+    lists:flatten(io_lib:format("~2..0w~2..0w~2..0w", 
+				[max(0,Year-2000),Mon,Day])).
 
 format_product(undefined) -> 
     "";
@@ -3062,18 +3358,24 @@ format_value(device,Value) when is_list(Value) ->
     Value;
 format_value(vsn,{Major,Minor}) ->
     integer_to_list(Major)++"."++integer_to_list(Minor);
-format_value(app_vsn,{{Year,Mon,Day},{_H,_M,_S}}) ->
-    lists:flatten(io_lib:format("~4..0w-~2..0w-~2..0w", 
-				[Year,Mon,Day]));
+format_value(app_vsn,Date={{_Year,_Mon,_Day},{_H,_M,_S}}) ->
+    format_date(Date);
 format_value(app_addr, Value) when is_integer(Value) -> 
     format_hex32(Value);
 format_value(product, Product) when is_integer(Product) ->
-    case (Product bsr 16) band 16#ff of
-	?PRODUCT_PDS -> "powerZone";
-	?PRODUCT_PDC -> "controlZone";
-	?PRODUCT_PDI -> "ioZone";
-	?PRODUCT_PDB -> "bridgeZone";
-	_ -> "Unknown"
+    case Product bsr 16 of
+	?PRODUCT_PDS_DMX -> "powerDMX";
+	?PRODUCT_PDB_DMX -> "bridgeDMX";
+	?PRODUCT_PDB_KELLY -> "bridgeKelly";
+	?PRODUCT_PDB_MARINCO -> "bridgeMarinco";
+	Type ->
+	    case Type band 16#ff of
+		?PRODUCT_PDS -> "powerZone";
+		?PRODUCT_PDC -> "controlZone";
+		?PRODUCT_PDI -> "ioZone";
+		?PRODUCT_PDB -> "bridgeZone";
+		_ -> "Unknown"
+	    end
     end;
 format_value(app_vsn,Value) when is_integer(Value) ->
     case Value of
@@ -3101,6 +3403,12 @@ is_uart_item(invert) -> true;
 is_uart_item(status) -> true;
 is_uart_item(_) -> false.
 
+update_node(N=#{ pos := Pos }, State) ->
+    case take_by_pos(Pos, State#state.nodes) of
+	false -> State;  %% not present ignore
+	{value,_Old,Ns} ->
+	    State#state { nodes = [N|Ns]}
+    end.
 
 update_uart(U=#{ pos := Pos }, State) ->
     case take_by_pos(Pos, State#state.uarts) of
@@ -3135,8 +3443,16 @@ take_node_by_id(_Id, [], _Ms) ->
 find_by_pos(Pos, Maps) ->  
     find_by_key(pos, Pos, Maps).
 
+find_node_by_pos(State) ->
+    find_node_by_pos(State#state.selected_tab, State#state.selected_pos,
+		     State#state.nodes).
+
 find_node_by_pos("nodes",Pos, Ns) ->  find_by_key(pos, Pos, Ns);
 find_node_by_pos(_Tab,_Pos,_Ns) -> false.
+
+find_uart_by_pos(State) ->
+    find_uart_by_pos(State#state.selected_tab, State#state.selected_pos,
+		     State#state.uarts).
 
 find_uart_by_pos("uarts",Pos, Ns) ->  find_by_key(pos, Pos, Ns);
 find_uart_by_pos(_Tab,_Pos,_Ns) -> false.
@@ -3230,21 +3546,22 @@ flash_node(Node,_Version,Bs,State) ->
 	      Progress = fun(V) -> epxy:set(ID,[{value,V}]) end,
 	      case gordon_can_flash:upload(Nid,Bs,1024,Progress) of
 		  ok ->
+		      io:format("Flash ok\n", []),
 		      SELF ! {node_flashed,ID,Nid,boot,ok};
 		  Error ->
+		      io:format("Flash failed ~p\n", [Error]),
 		      SELF ! {node_flashed,ID,Nid,boot,Error}
 	      end
       end),
     State1.
 
-flash_firmware(U, Firmware, DevType) ->
+flash_firmware(U,Pos,Firmware,DevType) ->
     BlockList = elpcisp:block_list(Firmware, DevType),
-    flash_block_list(U, DevType, BlockList).
+    flash_block_list(U,Pos,DevType, BlockList).
 
-flash_block_list(U, DevType, [{Start,StartBlock,EndBlock,Data}|Bs]) ->
+flash_block_list(U,Pos,DevType,[{Start,StartBlock,EndBlock,Data}|Bs]) ->
     {ok,_} = elpcisp:prepare_sector(U, StartBlock, EndBlock),
     {ok,_} = elpcisp:erase_sector(U, StartBlock, EndBlock),
-    Pos = 1,  %% fixme multiple uarts
     End = Start + byte_size(Data),
     ID = "uarts.r"++integer_to_list(Pos),
     elpcisp:flash_block(U, DevType, Start, Data,
@@ -3252,36 +3569,14 @@ flash_block_list(U, DevType, [{Start,StartBlock,EndBlock,Data}|Bs]) ->
 				V = (A-Start)/(End-Start),
 				epxy:set(ID,[{value,V}])
 			end),
-    flash_block_list(U, DevType, Bs);
-flash_block_list(_U, _DevType, []) ->
+    flash_block_list(U,Pos,DevType,Bs);
+flash_block_list(_U,_Pos,_DevType, []) ->
     ok.
 
 -define(T, 0,0,0,0).         %% transparent
 -define(W, 255,255,255,255). %% white
 -define(B, 255,0,0,0).       %% black
 
-%% 16/16
-%% knob_small() -> "$/gordon//priv/knob.png";
-knob_small() -> 
-    Pixels=
-<<?B,?B,?B,?B,?B,?B,?B,?B,?B,?B,?B,?B,?B,?B,?B,?B,
-  ?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,
-  ?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,
-  ?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,
-  ?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,
-  ?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,
-  ?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,
-  ?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,
-  ?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,
-  ?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,
-  ?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,
-  ?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,
-  ?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,
-  ?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,
-  ?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,?W,?W,?B,
-  ?B,?B,?B,?B,?B,?B,?B,?B,?B,?B,?B,?B,?B,?B,?B,?B
-    >>,
-    make_pixels(Pixels,16,16,argb).
 
 %% 22/22
 knob_medium() -> 
