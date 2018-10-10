@@ -603,6 +603,7 @@ handle_info({decimal_item,"ubt.creation",#{event:=changed,value:=Text}},State) -
 		    co_sdo_cli:send_sdo_set(CobId,?INDEX_BOOT_DATETIME,0,Value),
 		    Node1 = Node#{ creation=>Value },
 		    State1 = update_node(Node1, State),
+		    epxy:set("ubt.creation", [{text,format_date(Value)}]),
 		    {noreply, State1}
 	    catch
 		error:_ ->
@@ -621,9 +622,10 @@ handle_info({decimal_item,"uart.ubt.creation",
 		    Value = date10_to_utc_seconds(Date10),
 		    DecValue = integer_to_list(Value),
 		    uart_ubt_command(U,["datetime ",DecValue]),
-		    Info1 = Info#{creation=>Value},
+		    Info1 = Info#{ creation => Value},
 		    Uart1 = Uart#{ ubt_info => Info1},
 		    State1 = update_uart(Uart1, State),
+		    epxy:set("uart.ubt.creation", [{text,format_date(Value)}]),
 		    {noreply, State1}
 	    catch
 		error:_ ->
@@ -663,7 +665,7 @@ handle_info({hexadecimal_item,"uart.ubt.addr",
 		Value ->
 		    HexValue = integer_to_list(Value,16),
 		    uart_ubt_command(U,["addr 0x",HexValue]),
-		    Info1 = Info#{app_addr=>Value},
+		    Info1 = Info#{ app_addr => Value},
 		    Uart1 = Uart#{ ubt_info => Info1},
 		    State1 = update_uart(Uart1, State),
 		    {noreply, State1}
@@ -676,12 +678,9 @@ handle_info({hexadecimal_item,"uart.ubt.addr",
 	    lager:error("Uart not in hold mode\n", []),
 	    {noreply, State}	    
     end;
-
-
 handle_info({select,_ID,#{event:=button_release}},State) ->
     %% ignore mouse release in node selection
     {noreply, State};
-
 handle_info({switch,ID,#{event:=changed,value:=Value}},State) ->
     {SID,Si} = 
 	case ID of
@@ -728,7 +727,6 @@ handle_info({switch,ID,#{event:=changed,value:=Value}},State) ->
 	    ok
     end,
     {noreply, State};
-
 %% send a reset and set hold mode
 handle_info({button,[_,_,_|".hold"],#{event:=button_press}},State) ->
     case find_node_by_pos(State) of
@@ -739,7 +737,6 @@ handle_info({button,[_,_,_|".hold"],#{event:=button_press}},State) ->
 	    send_pdo1_tx(0, ?MSG_RESET, 0, Serial),
 	    {noreply,State#state{hold_mode = true }}
     end;
-
 %% leave boot mode
 handle_info({button,[_,_,_|".go"],#{event:=button_press}},State) ->
     WDT = 1,
@@ -2000,15 +1997,17 @@ controlZone(X,Y,_W,_H) ->
     %% X2 = X1+64,
     ID = "pdc",
 
-    {X11,Yn,_W0,H0} = tagged_text("pdc.app_vsn", "Version", X1, Y0, 0),
-    {X12,_,_W01,_H01} = tagged_text("pdc.uapp_vsn", "Upgrade", X11+XGap, Y0, 0),
-    W1 = X12,
-    Y1 = Yn,
+    {X11,Y1,_W0,H0} = tagged_text("pdc.app_vsn", "Version", X1, Y0, 0),
+    {_,_,_,_} = tagged_text("pdc.uapp_vsn", "Upgrade", X11+XGap, Y0, 0),
+    %% Din x 4 (row Y3,column=X1)
+    {_,Y2,W1,H1} = din_group("pdc.din", 1, 8, X1, Y1+YGap),
 
-    {W2,H2} = add_buttons(ID, X1, Y1+YGap),
+    {_,Y21,W11,H11} = ein_group("pdc.ein", 1, 8, X1+W1+XGap, Y1+YGap),
 
-    Wt = XGap+max(W1,W2)+XGap,
-    Ht = YGap+H0+H2+2*YGap,
+    {W2,H2} = add_buttons(ID, X1, max(Y2,Y21)+YGap),
+
+    Wt = XGap+max(W1+XGap+W11,W2+XGap)+XGap,
+    Ht = YGap+H0+YGap+max(H1,H2)+YGap+H2+YGap,
 
     group_rectangle(ID,"controlZone",X,Y,Wt,Ht,all),
 
@@ -2039,9 +2038,9 @@ uBoot(X,Y,_W,_H) ->
     {_,Y3,W2,H2} = product_menu("ubt.product", "Product", X1, Y2+YGap, TW),
 
     {_,Y4,W3,H3} = edit_text("ubt.creation", "Creation", X1, Y3+YGap, TW),
-    epxy:set("uart.ubt.creation", [{max_length,6},
+    epxy:set("ubt.creation", [{max_length,6},
 				   {filter,{?MODULE,event_filter,[decimal]}}]),
-    epxy:add_callback("uart.ubt.creation",decimal_item,?MODULE),
+    epxy:add_callback("ubt.creation",decimal_item,?MODULE),
 
     {_,Y5,W4,H4} = edit_text("ubt.addr", "Address", X1, Y4+YGap, TW),
     epxy:set("ubt.addr", [{max_length,8},
@@ -2272,6 +2271,23 @@ ain_group(ID, Chan0, Chan1, X0, Y0) ->
     group_rectangle(ID,"Ain [%]",X0,Y0,W,H,false),
     {X0,Y3,W,H}.
 
+ein_group(ID, Chan0, Chan1, X0, Y0) ->
+    Step = if Chan0 < Chan1 -> 1; true -> -1 end,
+    XLeft  = 12, XRight = 12,
+    YTop   = 12, YBot   = 12,
+    YGap   = ?GROUP_YGAP,
+    {Y2,W2} = lists:foldl(
+		fun(Chan, {Yi,Wi}) ->
+			Num = (Chan - min(Chan1,Chan0))+1,
+			{_,Y1,W1,_H1} = ein(ID,Chan,Num,XLeft,Yi),
+			{Y1+YGap, max(Wi,W1)}
+		end, {YTop,0}, lists:seq(Chan0,Chan1,Step)),
+    Y3 = Y0+(Y2-YGap)+YBot,
+    H = Y3-Y0,
+    W = XLeft+W2+XRight,
+    group_rectangle(ID,"Encoder",X0,Y0,W,H,false),
+    {X0,Y3,W,H}.
+
 aload_group(ID, Chan0, Chan1, X0, Y0) ->
     Step = if Chan0 < Chan1 -> 1; true -> -1 end,
     XLeft  = 12, XRight = 12,
@@ -2371,6 +2387,36 @@ ain(ID0,Chan,Num,X,Y) ->
 		 {format,"~.1f"},
 		 {value,0},
 		 {vscale, 100/65535}
+		]),
+    epxy:new(ID++".border",
+	     [{type,rectangle},
+	      {color,black},
+	      {x,-1},{y,-1},
+	      {width,W+2},{height,H+2}]),
+    epxy:new(ID++".label",[{type,text},
+			   {font,FontSpecL},
+			   {font_color,black},
+			   {x,-LW},{y,0},
+			   {width,LW},{height,H},
+			   {halign,left},
+			   {text,integer_to_list(Num)}]),
+    {X,Y+H,W+LW,H}.
+
+%% encoder input
+ein(ID0,Chan,Num,X,Y) ->
+    ID = ID0++[$.,$e|integer_to_list(Chan)],
+    W = 40, H = ?AIN_FONT_SIZE+4,  %% extra to match pout
+    LW = 12,
+    FontSpecL = [{name,"Arial"},{weight,medium},{size,?AIN_FONT_SIZE}],
+    FontSpec = [{name,"Arial"},{weight,bold},{size,?AIN_FONT_SIZE}],
+    epxy:new(ID,[{type,value},
+		 {halign,center},{valign,center},
+		 {x,X+LW},{y,Y},{width,W},{height,H},
+		 {children_first,false},
+		 {font,FontSpec},
+		 {fill,solid},{color,white},
+		 {format,"~w"},
+		 {value,0}
 		]),
     epxy:new(ID++".border",
 	     [{type,rectangle},
@@ -2926,10 +2972,42 @@ node_data(Index, Si, Value, State) ->
 			44 -> set_value("pdi.din.e44", Value);
 			_ -> ok
 		    end;
+		"pdc" ->
+		    case Si of
+			1 -> set_value("pdc.din.e1", Value);
+			2 -> set_value("pdc.din.e2", Value);
+			3 -> set_value("pdc.din.e3", Value);
+			4 -> set_value("pdc.din.e4", Value);
+			5 -> set_value("pdc.din.e5", Value);
+			6 -> set_value("pdc.din.e6", Value);
+			7 -> set_value("pdc.din.e7", Value);
+			8 -> set_value("pdc.din.e8", Value);
+			_ -> ok
+		    end;
 		_ ->
 		    ok
 	    end;
 
+	?MSG_ENCODER ->
+	    SID = selected_id(State),
+	    ?dbg("MSG_ENCODER: [~s], si=~w, value=~w\n", 
+		 [SID,Si,Value]),
+	    case SID of
+		"pdc" ->
+		    case Si of
+			1 -> set_value("pdc.ein.e1", Value);
+			2 -> set_value("pdc.ein.e2", Value);
+			3 -> set_value("pdc.ein.e3", Value);
+			4 -> set_value("pdc.ein.e4", Value);
+			5 -> set_value("pdc.ein.e5", Value);
+			6 -> set_value("pdc.ein.e6", Value);
+			7 -> set_value("pdc.ein.e7", Value);
+			8 -> set_value("pdc.ein.e8", Value);
+			_ -> ok
+		    end;
+		_ ->
+		    ok
+	    end;
 	?MSG_OUTPUT_ACTIVE ->
 	    SID = selected_id(State),
 	    ?dbg("MSG_OUTPUT_ACTIVE: [~s], si=~w, value=~w\n", 
