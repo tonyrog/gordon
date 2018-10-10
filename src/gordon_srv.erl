@@ -83,6 +83,7 @@
 -define(ACTIVITY_TIMEOUT, (10*1000000)). %% time when node is considered down
 -define(REMOVE_TIMEOUT,  30*1000000).   %% time after wich node is deleted
 -define(ECHO_INTERVAL, 5000).           %% ping every 5s
+-define(SAVE_TIMEOUT, 20*1000000).      %% special for save operation
 
 -define(TEXT_CELL_FONT_SIZE, 20).
 -define(DIN_FONT_SIZE, 14).
@@ -448,7 +449,7 @@ handle_info({menu,"ubt.product",#{event:=changed,value:=I}}, State) ->
 		    {noreply, State3}
 	    end
     end;
-handle_info({menu,"ubt.uart.product",
+handle_info({menu,"uart.ubt.product",
 	     #{event:=changed,value:=I}},State) ->
     case find_uart_by_pos(State) of
 	false -> {noreply, State};
@@ -479,7 +480,7 @@ handle_info({menu,"ubt.uart.product",
 			end,
 		    Hex = integer_to_list(Value,16),
 		    uart_ubt_command(U,["product 0x",Hex]),
-		    epxy:set("ubt.uart.product",
+		    epxy:set("uart.ubt.product",
 			     [{text,format_product(Value)}]),
 		    Info2 = [{product,Product}|
 			     lists:keydelete(product,1,Info1)],
@@ -525,7 +526,7 @@ handle_info({decimal_item,"ubt.serial",#{event:=changed,value:=Text}},State) ->
 		    {noreply, State}
 	    end
     end;
-handle_info({decimal_item,"ubt.uart.serial",
+handle_info({decimal_item,"uart.ubt.serial",
 	     #{event:=changed,value:=Text}},State) ->
     case find_uart_by_pos(State) of
 	false -> {noreply, State};
@@ -570,7 +571,7 @@ handle_info({decimal_item,"ubt.creation",#{event:=changed,value:=Text}},State) -
 		    {noreply, State}
 	    end
     end;
-handle_info({decimal_item,"ubt.uart.creation",
+handle_info({decimal_item,"uart.ubt.creation",
 	     #{event:=changed,value:=Text}},State) ->
     case find_uart_by_pos(State) of
 	false -> {noreply, State};
@@ -614,7 +615,7 @@ handle_info({hexadecimal_item,"ubt.addr",#{event:=changed,value:=Text}},State) -
 		    {noreply, State}
 	    end
     end;
-handle_info({hexadecimal_item,"ubt.uart.addr",
+handle_info({hexadecimal_item,"uart.ubt.addr",
 	     #{event:=changed,value:=Text}},State) ->
     case find_uart_by_pos(State) of
 	false -> {noreply, State};
@@ -710,9 +711,7 @@ handle_info({switch,ID,#{event:=changed,value:=Value}},State) ->
 
 %% send a reset and set hold mode
 handle_info({button,[_,_,_|".hold"],#{event:=button_press}},State) ->
-    case find_node_by_pos(State#state.selected_tab,
-			  State#state.selected_pos,
-			  State#state.nodes) of
+    case find_node_by_pos(State) of
 	false ->
 	    {noreply,State};
 	Node ->
@@ -733,9 +732,7 @@ handle_info({button,[_,_,_|".go"],#{event:=button_press}},State) ->
 %% show progress remove flash dialog and enable input
 %%
 handle_info({button,[_,_,_|".upgrade"],#{event:=button_press}},State) ->
-    case find_node_by_pos(State#state.selected_tab,
-			  State#state.selected_pos,
-			  State#state.nodes) of
+    case find_node_by_pos(State) of
 	false -> 
 	    {noreply,State};
 	Node ->
@@ -751,9 +748,7 @@ handle_info({button,[_,_,_|".upgrade"],#{event:=button_press}},State) ->
 %% reset the node
 handle_info({button,[_,_,_|".reset"],#{event:=button_press}},State) ->
     %% send a reset and set hold mode
-    case find_node_by_pos(State#state.selected_tab,
-			  State#state.selected_pos,
-			  State#state.nodes) of
+    case find_node_by_pos(State) of
 	false ->
 	    {noreply,State};
 	Node ->
@@ -763,9 +758,7 @@ handle_info({button,[_,_,_|".reset"],#{event:=button_press}},State) ->
     end;
 
 handle_info({button,[_,_,_|".setup"],#{event:=button_press}},State) ->
-    case find_node_by_pos(State#state.selected_tab,
-			  State#state.selected_pos,
-			  State#state.nodes) of
+    case find_node_by_pos(State) of
 	false ->
 	    {noreply,State};
 	Node ->
@@ -789,15 +782,20 @@ handle_info({button,[_,_,_|".factory"],#{event:=button_press}},State) ->
     {noreply,action_sdo(State,up,?IX_RESTORE_DEFAULT_PARAMETERS,4,<<"daol">>)};
 
 handle_info({button,[_,_,_|".save"],#{event:=button_press}},State) ->
-    {noreply,action_sdo(State,up,?IX_STORE_PARAMETERS,1,<<"evas">>)};
-
+    case find_node_by_pos(State) of
+	false -> {noreply, State};
+	Node -> 
+	    Activity = erlang:system_time(micro_seconds) + ?SAVE_TIMEOUT,
+	    Node1 = Node#{ activity => Activity },
+	    State1 = update_node(Node1, State),
+	    State2 = action_sdo(State1,up,?IX_STORE_PARAMETERS,1,<<"evas">>),
+	    {noreply,State2}
+    end;
 handle_info({button,[_,_,_|".restore"],#{event:=button_press}},State) ->
     {noreply, action_sdo(State,up,?IX_RESTORE_DEFAULT_PARAMETERS,1,<<"daol">>)};
 
 handle_info({button,"uart.lpc_sync",#{event:=button_press}},State) ->
-    case find_uart_by_pos(State#state.selected_tab,
-			  State#state.selected_pos,
-			  State#state.uarts) of
+    case find_uart_by_pos(State) of
 	false ->
 	    {noreply,State};
 	Uart = #{ pos := I, uart := undefined, device := Device } ->
@@ -809,8 +807,8 @@ handle_info({button,"uart.lpc_sync",#{event:=button_press}},State) ->
 		    {noreply, State1};
 		_Error ->
 		    ?dbg("elpcisp open error ~p\n", [_Error]),
-		    set_uart_status(I,error),
-		    set_lpc_info([]),
+		    refresh_uart_row(status,I,error),
+		    refresh_lpc_info([]),
 		    {noreply, State}
 	    end;
 	Uart = #{ uart := U } when is_port(U) ->
@@ -824,9 +822,7 @@ handle_info({button,"uart.lpc_flash",#{event:=button_press}},State) ->
 	{ihex,Firmware} ->
 	    ?dbg("elpcisp flash firmware size ~p\n", 
 		 [firmware_size(Firmware)]),
-	    case find_uart_by_pos(State#state.selected_tab,
-				  State#state.selected_pos,
-				  State#state.uarts) of
+	    case find_uart_by_pos(State) of
 		false ->
 		    {noreply, State};
 		#{ pos := I, uart := U, baud := Baud, lpc_type := DevType } 
@@ -836,17 +832,17 @@ handle_info({button,"uart.lpc_flash",#{event:=button_press}},State) ->
 			{ok,_} ->
 			    ?dbg("Unlock ok\n",[]),
 			    elpcisp:set_baud_rate(U,Baud,1),
-			    set_uart_status(I,flash),
+			    refresh_uart_row(status,I,flash),
 			    case flash_firmware(U, I, Firmware, DevType) of
 				ok ->
-				    set_uart_status(I,sync);
+				    refresh_uart_row(status,I,sync);
 				_Error ->
 				    ?dbg("elpcisp flash error ~p\n", [_Error]),
-				    set_uart_status(I,error)
+				    refresh_uart_row(status,I,error)
 			    end;
 			_Error ->
 			    ?dbg("elpcisp unlock error ~p\n", [_Error]),
-			    set_uart_status(I,error)
+			    refresh_uart_row(status,I,error)
 		    end,
 		    {noreply, State};
 		_ ->
@@ -857,39 +853,33 @@ handle_info({button,"uart.lpc_flash",#{event:=button_press}},State) ->
     end;
 
 handle_info({button,"uart.lpc_go",#{event:=button_press}},State) ->
-    case find_uart_by_pos(State#state.selected_tab,
-			  State#state.selected_pos,
-			  State#state.uarts) of
+    case find_uart_by_pos(State) of
 	false ->
 	    {noreply, State};
 	#{ uart := undefined } ->
 	    {noreply, State};
 	#{ pos := I, uart := U } ->
 	    case elpcisp:go(U, 0) of
-		{ok,_} -> set_uart_status(I,idle);
-		_Error -> set_uart_status(I,error)
+		{ok,_} -> refresh_uart_row(status,I,idle);
+		_Error -> refresh_uart_row(status,I,error)
 	    end,
 	    {noreply, State}
     end;
 handle_info({button,"uart.lpc_reset",#{event:=button_press}},State) ->
-    case find_uart_by_pos(State#state.selected_tab,
-			  State#state.selected_pos,
-			  State#state.uarts) of
+    case find_uart_by_pos(State) of
 	false ->
 	    {noreply, State};
 	#{ uart := undefined } ->
 	    {noreply, State};
 	#{ pos := I, uart := U } ->	
 	    case elpcisp:reset(U) of
-		{ok,_} -> set_uart_status(I,idle);
-		_Error -> set_uart_status(I,error)
+		{ok,_} -> refresh_uart_row(status,I,idle);
+		_Error -> refresh_uart_row(status,I,error)
 	    end,
 	    {noreply, State}
     end;
 handle_info({button,"uart.ubt.hold",#{event:=button_press}},State) ->
-    case find_uart_by_pos(State#state.selected_tab,
-			  State#state.selected_pos,
-			  State#state.uarts) of
+    case find_uart_by_pos(State) of
 	false ->
 	    {noreply, State};
 	#{ uart := undefined } ->
@@ -899,7 +889,7 @@ handle_info({button,"uart.ubt.hold",#{event:=button_press}},State) ->
 	    case detect_uart_hold(U,1000) of
 		true ->
 		    io:format("HOLD=already\n"),
-		    set_uart_status(I,hold),
+		    refresh_uart_row(status,I,hold),
 		    Info = uart_ubt_info(U),
 		    Uart1 = Uart#{ hold=>true, ubt_info=>Info },
 		    refresh_uart_state(Uart1, State),
@@ -912,7 +902,7 @@ handle_info({button,"uart.ubt.hold",#{event:=button_press}},State) ->
 		    case detect_uart_hold(U,1000) of
 			true ->
 			    io:format("HOLD=true\n"),
-			    set_uart_status(I,hold),
+			    refresh_uart_row(status,I,hold),
 			    Info = uart_ubt_info(U),
 			    Uart1 = Uart#{ hold=>true, ubt_info=>Info },
 			    refresh_uart_state(Uart1, State),
@@ -920,7 +910,7 @@ handle_info({button,"uart.ubt.hold",#{event:=button_press}},State) ->
 			    {noreply, State1};
 			false ->
 			    io:format("HOLD=false\n"),
-			    set_uart_status(I,open),
+			    refresh_uart_row(status,I,open),
 			    Uart1 = Uart#{ hold=>false, ubt_info=>[] },
 			    refresh_uart_state(Uart1, State),
 			    State1 = update_uart(Uart1, State),
@@ -930,16 +920,14 @@ handle_info({button,"uart.ubt.hold",#{event:=button_press}},State) ->
     end;
 
 handle_info({button,"uart.ubt.go",#{event:=button_press}},State) ->
-    case find_uart_by_pos(State#state.selected_tab,
-			  State#state.selected_pos,
-			  State#state.uarts) of
+    case find_uart_by_pos(State) of
 	false ->
 	    {noreply, State};
 	#{ uart := undefined } ->
 	    {noreply, State};
 	Uart = #{ pos := I, uart := U, hold := true } when is_port(U) ->
 	    uart_ubt_command(U, "go"),
-	    set_uart_status(I,open),
+	    refresh_uart_row(status,I,open),
 	    Uart1 = Uart#{ hold=>false },
 	    State1 = update_uart(Uart1, State),
 	    {noreply, State1};
@@ -947,9 +935,7 @@ handle_info({button,"uart.ubt.go",#{event:=button_press}},State) ->
 	    {noreply, State}
     end;
 handle_info({button,"uart.ubt.reset",#{event:=button_press}},State) ->
-    case find_uart_by_pos(State#state.selected_tab,
-			  State#state.selected_pos,
-			  State#state.uarts) of
+    case find_uart_by_pos(State) of
 	false ->
 	    {noreply, State};
 	#{ uart := undefined } ->
@@ -957,7 +943,7 @@ handle_info({button,"uart.ubt.reset",#{event:=button_press}},State) ->
 	Uart = #{ pos := I, uart := U, hold := true } when is_port(U) ->
 	    uart_ubt_command(U, "reset"),
 	    Uart1 = Uart#{ hold=>false },
-	    set_uart_status(I,open),
+	    refresh_uart_row(status,I,open),
 	    State1 = update_uart(Uart1, State),
 	    {noreply, State1};
 	_ ->
@@ -1072,7 +1058,7 @@ uart_sync(Uart=#{ uart:=U, pos:=I}, State) ->
     put(control, maps:get(control,Uart,false)),
     put(control_swap, maps:get(control_swap,Uart,false)),
     put(control_inv, maps:get(control_inv,Uart,false)),
-    set_uart_status(I,sync),
+    refresh_uart_row(status,I,sync),
     case elpcisp:sync_osc(U, 4, 1000, "12000") of
 	{ok,_} ->
 	    case elpcisp:read_device_type(U) of
@@ -1089,7 +1075,7 @@ uart_sync(Uart=#{ uart:=U, pos:=I}, State) ->
 		_Error ->
 		    elpcisp:close(U),
 		    ?dbg("elpcisp read error ~p\n", [_Error]),
-		    set_uart_status(I,error),
+		    refresh_uart_row(status,I,error),
 		    Uart1 = Uart#{ uart=>undefined,
 				   status=>error,
 				   hold=>false,
@@ -1101,7 +1087,7 @@ uart_sync(Uart=#{ uart:=U, pos:=I}, State) ->
 	_Error ->
 	    elpcisp:close(U),
 	    ?dbg("elpcisp read error ~p\n", [_Error]),
-	    set_uart_status(I,error),
+	    refresh_uart_row(status,I,error),
 	    Uart1 = Uart#{ uart=>undefined,
 			   status=>error,
 			   hold=>false,
@@ -1233,46 +1219,14 @@ make_uart_list([{uart,I,Opts}|Us]) when is_integer(I), I>0 ->
     Control = proplists:get_value(control,Opts,false),
     ControlSwap = proplists:get_value(control_swap,Opts,false),
     ControlInv = proplists:get_value(control_inv,Opts,false),
-    %%
-    {Manuf0,Prod0,Serial0} = get_name_info(Device),
-    Manuf = trunc_text(Manuf0,12),
-    _Prod = trunc_text(Prod0,12),
-    Serial = trunc_text(Serial0,8),
-    set_uart_text(device,I,Manuf++" "++Serial),
-    set_uart_text(baud,I,Baud),
-    set_uart_text(control,I,uint1(Control)),
-    set_uart_text(swap,I,uint1(ControlSwap)),
-    set_uart_text(invert,I,uint1(ControlInv)),
-    set_uart_status(I,idle),
-    [ #{ pos => I, 
-	 uart => undefined,
-	 device => Device, 
-	 baud => Baud,
-	 control => Control, 
-	 control_swap => ControlSwap,
-	 control_inv => ControlInv, 
-	 status => idle,
-	 lpc_type => 0,
-	 lpc_info => [],
-	 hold => false,
-	 ubt_info => []
-       } | make_uart_list(Us)].
-
-set_uart_ubt_info(Info) ->
-    Serial   = proplists:get_value(serial,Info),
-    Product  = proplists:get_value(product,Info),
-    Creation = proplists:get_value(datetime,Info),
-    AppAddr  = proplists:get_value(app_addr,Info),
-    AppVsn   = proplists:get_value(app_vsn,Info),
-    epxy:set("uart.ubt.app_vsn", [{text,format_value(app_vsn,AppVsn)}]),
-    epxy:set("uart.ubt.serial", [{text,format_value(serial,Serial)}]),
-    set_product_menu("uart.ubt.product", Product),
-    epxy:set("uart.ubt.creation", [{text,format_date(Creation)}]),
-    epxy:set("uart.ubt.addr", [{text,format_value(app_addr,AppAddr)}]),
-    ok.
-
-uint1(true) -> 1;
-uint1(false) -> 0.
+    Uart = #{ pos => I, uart => undefined,
+	      device => Device, baud => Baud,
+	      control => Control, control_swap => ControlSwap,
+	      control_inv => ControlInv, status => idle,
+	      lpc_type => 0, lpc_info => [], hold => false,
+	      ubt_info => [] },
+    refresh_uart_row(Uart),
+    [Uart | make_uart_list(Us)].
 
 trunc_text(Text,MaxLen) ->
     string:substr(Text, 1, MaxLen).
@@ -1299,10 +1253,20 @@ get_name_info("/dev/serial/by-id/usb-"++Name) ->
 get_name_info("/dev/"++Name) ->
     {"","USB",Name}.
 
-set_uart_status(I,Status) ->
-    set_uart_text(status,I,Status).
+refresh_uart_ubt_info(Info) ->
+    Serial   = proplists:get_value(serial,Info),
+    Product  = proplists:get_value(product,Info),
+    Creation = proplists:get_value(datetime,Info),
+    AppAddr  = proplists:get_value(app_addr,Info),
+    AppVsn   = proplists:get_value(app_vsn,Info),
+    epxy:set("uart.ubt.app_vsn", [{text,format_value(app_vsn,AppVsn)}]),
+    epxy:set("uart.ubt.serial", [{text,format_value(serial,Serial)}]),
+    set_product_menu("uart.ubt.product", Product),
+    epxy:set("uart.ubt.creation", [{text,format_date(Creation)}]),
+    epxy:set("uart.ubt.addr", [{text,format_value(app_addr,AppAddr)}]),
+    ok.
 
-set_lpc_info(Info) ->
+refresh_lpc_info(Info) ->
     Vsn = proplists:get_value(version, Info),
     epxy:set("uart.vsn",[{text,format_value(vsn,Vsn)}]),
 
@@ -1332,9 +1296,7 @@ set_lpc_info(Info) ->
 %%  setup state=up
 %%
 refresh_node_state(State) ->
-    case find_node_by_pos(State#state.selected_tab,
-			  State#state.selected_pos,
-			  State#state.nodes) of
+    case find_node_by_pos(State) of
 	false -> State;
 	Node -> refresh_node_state(Node,State)
     end.
@@ -1392,9 +1354,7 @@ refresh_node_state(SID, Node, State) ->
     end.
 
 refresh_uart_state(State) ->
-    case find_uart_by_pos(State#state.selected_tab,
-			  State#state.selected_pos,
-			  State#state.uarts) of
+    case find_uart_by_pos(State) of
 	false -> State;
 	Uart -> refresh_uart_state(Uart,State)
     end.
@@ -1423,14 +1383,14 @@ refresh_uart_state(SID, Uart, State) ->
 		    enable_buttons("uart.ubt", ["hold"]),
 		    disable_buttons("uart.ubt", ["go", "reset"])
 	    end,
-	    set_lpc_info(LpcInfo),
-	    set_uart_ubt_info(UbtInfo);
+	    refresh_lpc_info(LpcInfo),
+	    refresh_uart_ubt_info(UbtInfo);
 	#{ lpc_info := LpcInfo, ubt_info := UbtInfo } ->
 	    enable_buttons(SID,  ["lpc_sync"]),
 	    disable_buttons(SID, ["lpc_go", "lpc_flash", "lpc_reset"]),
 	    disable_buttons("uart.ubt", ["hold", "go", "reset"]),
-	    set_lpc_info(LpcInfo),
-	    set_uart_ubt_info(UbtInfo)
+	    refresh_lpc_info(LpcInfo),
+	    refresh_uart_ubt_info(UbtInfo)
     end,
     State.
 
@@ -1485,9 +1445,7 @@ match_uapp_vsn(_AppVersion, []) ->
     false.
     
 action_sdo(State, Status, Index, Si, Value) ->
-    case find_node_by_pos(State#state.selected_tab,
-			  State#state.selected_pos,
-			  State#state.nodes) of
+    case find_node_by_pos(State) of
 	false ->
 	    State;
 	Node ->
@@ -3065,17 +3023,17 @@ node_data(Index, Si, Value, State) ->
 node_activity(Now, State) ->
     node_activity_(State#state.nodes, Now, [], State).
 
-node_activity_([N=#{pos := Pos,activity := Then,status := Status}|Ns],
-		    Now,Acc,State) ->
-    if 
+node_activity_([N=#{pos:=Pos,activity:=Then,status:=Status}|Ns],
+	       Now,Acc,State) ->
+    if
 	Status =:= flash ->
 	    node_activity_(Ns,Now,[N|Acc],State);
 	Now >= Then + ?REMOVE_TIMEOUT, Status =/= free ->
-	    set_text(serial,Pos,""),
-	    set_text(id,Pos,""),
-	    set_text(product,Pos,""),
-	    set_text(vsn,Pos,""),
-	    set_text(status,Pos,free),
+	    refresh_node_row(serial,Pos,""),
+	    refresh_node_row(id,Pos,""),
+	    refresh_node_row(product,Pos,""),
+	    refresh_node_row(vsn,Pos,""),
+	    refresh_node_row(status,Pos,free),
 	    Acc1 = [N#{status=>free,serial=>0,id=>0,
 		       product=>0,vsn=>0}|Acc],
 	    if Pos =:= State#state.selected_pos ->
@@ -3087,7 +3045,7 @@ node_activity_([N=#{pos := Pos,activity := Then,status := Status}|Ns],
 	    end;
 
 	Now >= Then + ?ACTIVITY_TIMEOUT, Status =/= free, Status =/= down ->
-	    set_text(status,Pos,down),
+	    refresh_node_row(status,Pos,down),
 	    Acc1 = [N#{status=>down}|Acc],
 	    if Pos =:= State#state.selected_pos ->
 		    State1 = deselect_row(State#state.selected_tab,
@@ -3174,12 +3132,12 @@ set_status_by_serial(Serial, Status, Ns) ->
     Now = erlang:system_time(micro_seconds),
     case take_node_by_serial(Serial, Ns) of
 	{value,N=#{ pos := Pos },Ns1} ->
-	    set_text(status,Pos,Status),
+	    refresh_node_row(status,Pos,Status),
 	    [ N#{ status => Status, activity => Now } | Ns1];
 	false ->
 	    {N0=#{pos:=Pos},Ns1} = allocate_node(Ns),
-	    set_text(status,Pos,Status),
-	    set_text(serial,Pos,Serial),
+	    refresh_node_row(status,Pos,Status),
+	    refresh_node_row(serial,Pos,Serial),
 	    N = N0#{ serial => Serial, status => Status, activity => Now },
 	    [ N | Ns1 ]
     end.
@@ -3227,12 +3185,12 @@ set_by_cobid_(CobID,Key,Value,State) ->
 	    case take_node_by_serial(Serial, Ns) of
 		false ->
 		    {N0=#{pos:=Pos},Ns1} = allocate_node(Ns),
-		    set_text(serial,Pos,Serial),
-		    set_text(Key,Pos,Value),
+		    refresh_node_row(serial,Pos,Serial),
+		    refresh_node_row(Key,Pos,Value),
 		    N = N0#{serial=>Serial,activity=>Now,Key=>Value },
 		    State#state { nodes=[N|Ns1]};
 		{value,N0=#{ pos:=Pos},Ns1} ->
-		    set_text(Key,Pos,Value),
+		    refresh_node_row(Key,Pos,Value),
 		    N = N0#{ activity=>Now, Key => Value },
 		    State#state { nodes=[N|Ns1]}
 	    end;
@@ -3242,12 +3200,12 @@ set_by_cobid_(CobID,Key,Value,State) ->
 	    case take_node_by_id(ID, Ns) of
 		false ->
 		    {N0=#{pos:=Pos},Ns1} = allocate_node(Ns),
-		    set_text(id,Pos,ID),
-		    set_text(Key,Pos,Value),
+		    refresh_node_row(id,Pos,ID),
+		    refresh_node_row(Key,Pos,Value),
 		    N = N0#{ id=>ID, activity=>Now, Key=>Value },
 		    State#state { nodes=[N|Ns1]};
 		{value,N0=#{ pos:=Pos},Ns1} ->
-		    set_text(Key,Pos,Value),
+		    refresh_node_row(Key,Pos,Value),
 		    N = N0#{ activity=>Now, Key => Value },
 		    State#state { nodes=[N|Ns1]}
 	    end
@@ -3285,7 +3243,7 @@ set_product_menu(Item, Product) ->
 
 %% set text value in nodes table
 %% nodes.r<pos>.<key>
-set_text(Key,Pos,Value) ->
+refresh_node_row(Key,Pos,Value) ->
     case is_node_item(Key) of
 	true ->
 	    ID = "nodes.r"++integer_to_list(Pos)++"."++atom_to_list(Key),
@@ -3295,15 +3253,32 @@ set_text(Key,Pos,Value) ->
 	    ok
     end.
 
-set_uart_text(Key,Pos,Value) ->
+refresh_uart_row(#{ pos:=I, device:=Device, baud:=Baud,
+		    control:=Control, control_swap:=ControlSwap,
+		    control_inv:=ControlInv, status:=Status}) ->
+    {Manuf0,Prod0,Serial0} = get_name_info(Device),
+    Manuf = trunc_text(Manuf0,12),
+    _Prod = trunc_text(Prod0,12),
+    Serial = trunc_text(Serial0,8),
+    refresh_uart_row(device,I,Manuf++" "++Serial),
+    refresh_uart_row(baud,I,Baud),
+    refresh_uart_row(control,I,uint1(Control)),
+    refresh_uart_row(swap,I,uint1(ControlSwap)),
+    refresh_uart_row(invert,I,uint1(ControlInv)),
+    refresh_uart_row(status,I,Status).
+
+refresh_uart_row(Key,Pos,Value) ->
     case is_uart_item(Key) of
 	true ->
 	    ID = "uarts.r"++integer_to_list(Pos)++"."++atom_to_list(Key),
-	    ?dbg("set_uart_text: id=~s, value=~p\n", [ID,Value]),
+	    ?dbg("refresh_uart_row: id=~s, value=~p\n", [ID,Value]),
 	    epxy:set(ID,[{text,format_value(Key,Value)}]);
 	false ->
 	    ok
     end.
+
+uint1(true) -> 1;
+uint1(false) -> 0.
 
 %% given
 date10_to_utc_seconds(Date10) ->
@@ -3416,7 +3391,6 @@ update_uart(U=#{ pos := Pos }, State) ->
 	{value,_Old,Us} ->
 	    State#state { uarts = [U|Us]}
     end.
-
 
 %% find node with Serial
 take_node_by_serial(Serial, Ns) ->
