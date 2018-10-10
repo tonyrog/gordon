@@ -24,12 +24,17 @@
 -define(is_result_iap_success(R),
 	(?is_result_iap(R) andalso (((R) band 16#FF) == ?IAP_CMD_SUCCESS))).
 
+-define(DEFAULT_MAX_RETRY, 3).
+-define(CN_APP_EMPTY,        16#2F5EBD7A). %% 0101111010111101011110101111010
 
-%% FIXME: add flash multiple non disjoint segments?
-upload(Nid,[{Addr,Segment}],Bsize,Progress) ->
-    upload(Nid,Addr,Segment,Bsize,Progress).
+%% FIXME: add flash multiple non disjoint segments
+upload(Nid,Segments,Bsize,Progress) ->
+    upload(Nid,Segments,Bsize,Progress,?DEFAULT_MAX_RETRY).
 
-upload(Nid,Addr,Data,Bsize,Progress) ->
+upload(Nid,[{Addr,Segment}],Bsize,Progress,MaxRetry) ->
+    upload(Nid,Addr,Segment,Bsize,Progress,MaxRetry).
+
+upload(Nid,Addr,Data,Bsize,Progress,MaxRetry) ->
     co_sdo_cli:attach(Nid),
     Len = byte_size(Data),
     Nblocks = (Len+Bsize-1) div Bsize,
@@ -46,10 +51,10 @@ upload(Nid,Addr,Data,Bsize,Progress) ->
 		    case co_sdo_cli:set(Nid,?INDEX_UBOOT_ERASE,1,1024*Kb,10000) of
 			ok ->
 			    blocks_upload(Nid,Addr,Data,Bsize,{0,0,Len1},
-					  Progress);
+					  Progress,MaxRetry);
 			{error,Code} when ?is_result_iap_success(Code) ->
 			    blocks_upload(Nid,Addr,Data,Bsize,{0,0,Len1},
-					  Progress);
+					  Progress,MaxRetry);
 			Error ->
 			    Error
 		    end;
@@ -58,39 +63,61 @@ upload(Nid,Addr,Data,Bsize,Progress) ->
 	    end
     end.
 
-%% FIXME add retry
-blocks_upload(Nid,_Addr,<<>>,_Bsize,{L,_L0,Len},Progress) ->
+blocks_upload(Nid,_Addr,<<>>,_Bsize,{L,_L0,Len},Progress,_MaxRetry) ->
     Progress(L/Len),
-    co_sdo_cli:set(Nid,?INDEX_BOOT_APP_VSN,0,16#2F5EBD7A,1000);
-blocks_upload(Nid,Addr,Data,Bsize,LLen,Progress) ->
+    co_sdo_cli:set(Nid,?INDEX_BOOT_APP_VSN,0,?CN_APP_EMPTY,1000);
+blocks_upload(Nid,Addr,Data,Bsize,LLen,Progress,MaxRetry) ->
     {Block,Data1} = get_block(Data,Bsize),
-    case block_upload(Nid,Addr,Block,LLen,Progress) of
+    case block_upload(Nid,Addr,Block,LLen,Progress,MaxRetry,ok) of
 	{ok,Addr1,LLen1} ->
-	    blocks_upload(Nid,Addr1,Data1,Bsize,LLen1,Progress);
+	    blocks_upload(Nid,Addr1,Data1,Bsize,LLen1,Progress,MaxRetry);
 	Error ->
 	    Error
     end.
 
-block_upload(Nid,Addr,Block,LLen,Progress) ->
+
+block_upload(_Nid,_Addr,_Block,_LLen,_Progress,0,Error) ->
+    Error;
+block_upload(Nid,Addr,Block,LLen,Progress,I,_Error) ->
     %%io:format("block_upload: size=~w, Block=~p\n", [byte_size(Block), Block]),
     case co_sdo_cli:set(Nid,?INDEX_UBOOT_ADDR,1,Addr,1000) of
 	ok ->
 	    N = byte_size(Block),
 	    case block_upload_(Nid,0,Block,N,LLen,Progress) of
 		{ok,LLen1} ->
-		    Crc = crc32r(Block),
-		    case co_sdo_cli:set(Nid,?INDEX_UBOOT_FLASH,1,Crc,2000) of
-			ok ->
-			    {ok,Addr+N,LLen1};
-			{error,Code} when ?is_result_iap_success(Code) ->
-			    {ok,Addr+N,LLen1};
-			{error,Code} when is_integer(Code) ->
-			    {error,decode_iap_error(Code)};
-			Result -> Result
+		    case co_sdo_cli:get(Nid,?INDEX_UBOOT_ADDR,1,1000) of
+			{ok,RAddr} when RAddr =:= Addr+N ->
+			    Crc = crc32r(Block),
+			    case co_sdo_cli:set(Nid,?INDEX_UBOOT_FLASH,1,Crc,2000) of
+				ok ->
+				    case co_sdo_cli:get(Nid,?INDEX_BOOT_VSN,0,1000) of
+					{ok,_} -> {ok,Addr+N,LLen1};
+					Error ->
+					    block_upload(Nid,Addr,Block,LLen,Progress,I-1,Error)
+				    end;
+				{error,Code} when ?is_result_iap_success(Code) ->
+				    case co_sdo_cli:get(Nid,?INDEX_BOOT_VSN,0,1000) of
+					{ok,_} -> {ok,Addr+N,LLen1};
+					Error ->
+					    block_upload(Nid,Addr,Block,LLen,Progress,I-1,Error)
+				    end;
+				{error,Code} when is_integer(Code) ->
+				    block_upload(Nid,Addr,Block,LLen,Progress,I-1,
+						 {error,decode_iap_error(Code)});
+				Result ->
+				    block_upload(Nid,Addr,Block,LLen,Progress,I-1,
+						 Result)
+			    end;
+			{ok,_} ->
+			    block_upload(Nid,Addr,Block,LLen,Progress,I-1,{error,bad_addr});
+			Error ->
+			    block_upload(Nid,Addr,Block,LLen,Progress,I-1,Error)
 		    end;
-		Error -> Error
+		Error ->
+		    block_upload(Nid,Addr,Block,LLen,Progress,I-1,Error)
 	    end;
-	Error -> Error
+	Error ->
+	    block_upload(Nid,Addr,Block,LLen,Progress,I-1,Error)
     end.
 
 %% Upload one block
@@ -110,7 +137,7 @@ block_upload_(Nid,I,Data,N,_LLen={L,L0,Len},Progress) when N > 0 ->
 			    {L1,L0,Len}
 		    end,
 	    block_upload_(Nid,I+K,Data,N-K,LLen1,Progress);
-	{error,Reason} -> %% retry?
+	{error,Reason} ->
 	    {error,Reason}
     end.
 
