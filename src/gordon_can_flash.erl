@@ -85,17 +85,20 @@ block_upload(Nid,Addr,Block,LLen,Progress,I,_Error) ->
 	    N = byte_size(Block),
 	    case block_upload_(Nid,0,Block,N,LLen,Progress) of
 		{ok,LLen1} ->
+		    %% Check that the Address has not been corrupted
 		    case co_sdo_cli:get(Nid,?INDEX_UBOOT_ADDR,1,1000) of
-			{ok,RAddr} when RAddr =:= Addr+N ->
+			{ok,Addr} ->
 			    Crc = crc32r(Block),
 			    case co_sdo_cli:set(Nid,?INDEX_UBOOT_FLASH,1,Crc,2000) of
 				ok ->
+				    %% check that uboot is still alive
 				    case co_sdo_cli:get(Nid,?INDEX_BOOT_VSN,0,1000) of
 					{ok,_} -> {ok,Addr+N,LLen1};
 					Error ->
 					    block_upload(Nid,Addr,Block,LLen,Progress,I-1,Error)
 				    end;
 				{error,Code} when ?is_result_iap_success(Code) ->
+				    %% check that uboot is still alive
 				    case co_sdo_cli:get(Nid,?INDEX_BOOT_VSN,0,1000) of
 					{ok,_} -> {ok,Addr+N,LLen1};
 					Error ->
