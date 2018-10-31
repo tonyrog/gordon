@@ -277,7 +277,8 @@ init(Options) ->
     %% request response from all nodes
     send_pdo1_tx(0, ?MSG_ECHO_REQUEST, 0, 0),
 
-    Firmware = load_firmware(),
+    FirmwareDir = proplists:get_value(firmware_dir,Env,code:priv_dir(gordon)),
+    Firmware = load_firmware(FirmwareDir),
 
     Devices = proplists:get_value(devices,Env,[]),
     UARTS = make_uart_list(Devices),
@@ -3556,8 +3557,7 @@ take_by_key(_Key, _Value, [], _Ms) ->
     false.
 
 
-load_firmware() ->
-    Dir = code:priv_dir(gordon),
+load_firmware(Dir) ->
     case file:list_dir(Dir) of
 	{ok,L} ->
 	    load_firm(Dir, L, []);
