@@ -184,7 +184,7 @@
 -define(CN_APP_NONE,         16#FFFFFFFF).
 -define(CN_APP_EMPTY,        16#2F5EBD7A). %% 0101111010111101011110101111010
 
-%% -define(dbg(F,A), io:format((F),(A))).
+%%-define(dbg(F,A), io:format((F),(A))).
 -define(dbg(F,A), ok).
 -define(warn(F,A), io:format((F),(A))).
 -define(error(F,A), io:format((F),(A))).
@@ -1171,7 +1171,7 @@ uart_ubt_recv_num(U, Timeout) ->
 		error:_ -> -1
 	    end;
 	{uart, U, _Data} ->
-	    ?dbg("FLUSH ~p\n", [Data]),
+	    ?dbg("FLUSH ~p\n", [_Data]),
 	    uart_ubt_recv_num(U, Timeout)
     after
 	Timeout -> -1
@@ -2003,7 +2003,7 @@ controlZone(X,Y,_W,_H) ->
     %% Din x 4 (row Y3,column=X1)
     {_,Y2,W1,H1} = din_group("pdc.din", 1, 8, X1, Y1+YGap),
 
-    {_,Y21,W11,H11} = ein_group("pdc.ein", 1, 8, X1+W1+XGap, Y1+YGap),
+    {_,Y21,W11,_H11} = ein_group("pdc.ein", 1, 8, X1+W1+XGap, Y1+YGap),
 
     {W2,H2} = add_buttons(ID, X1, max(Y2,Y21)+YGap),
 
