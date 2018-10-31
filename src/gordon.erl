@@ -46,6 +46,12 @@ start_rpi() ->
     application:set_env(epx, input_mouse_device, "/dev/input/event0"),
     application:set_env(can, wakeup, true),
     application:set_env(canopen, serial, no_master),
+    %% make sure CANUSB is on full speed (+ other FTDI serial devices)
+    lists:foreach(
+      fun(UsbDev) ->
+	      %% ignore output since only FTDI devices will return ok
+	      os:cmd("setserial "++UsbDev++" low_latency")
+      end, filelib:wildcard("/dev/ttyUSB*")),
     %% now start
     application:ensure_all_started(canopen),
     can_udp:start(),
