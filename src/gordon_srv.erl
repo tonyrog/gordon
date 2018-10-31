@@ -1137,12 +1137,12 @@ uart_ubt_detect_hold_(U, Timeout) ->
 uart_ubt_info(U) ->
     Serial   = uart_ubt_read_num(U, "serial"),
     Product  = uart_ubt_read_num(U, "product"),
-    Datetime = uart_ubt_read_num(U, "datetime"),
+    Creation = uart_ubt_read_num(U, "datetime"),
     AppAddr  = uart_ubt_read_num(U, "addr"),
     AppVsn   = uart_ubt_read_num(U, "vsn"),
     #{ serial   => (Serial bsr 8),
        product  => Product,
-       datetime => Datetime,
+       creation => Creation,
        app_addr => AppAddr,
        app_vsn  => AppVsn }.
 
