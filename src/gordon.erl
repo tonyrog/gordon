@@ -6,6 +6,7 @@
 
 -export([start/0]).
 -export([start_rpi/0]).
+-export([status/0]).
 
 start() ->
     %% (catch error_logger:tty(false)),
@@ -40,3 +41,15 @@ start_rpi() ->
     Height = application:get_env(gordon, screen_height, 480),
     epxy:start_link([{width,Width}, {height,Height}]),
     application:start(gordon).
+
+%%--------------------------------------------------------------------
+%% @doc
+%%  Display "up" called from shell!!!
+%% @end
+%%--------------------------------------------------------------------
+
+status() ->
+    case erlang:whereis(gordon_srv) of
+	undefined -> io:format("faulty\n", []);
+	Pid when is_pid(Pid) -> io:format("up\n", [])
+    end.
