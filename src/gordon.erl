@@ -7,6 +7,9 @@
 -export([start/0]).
 -export([start_rpi/0]).
 -export([status/0]).
+-export([firmware_info/0]).
+
+-define(SERVER, gordon_srv).
 
 start() ->
     (catch error_logger:tty(false)),
@@ -67,7 +70,10 @@ start_rpi() ->
 %%--------------------------------------------------------------------
 
 status() ->
-    case erlang:whereis(gordon_srv) of
+    case erlang:whereis(?SERVER) of
 	undefined -> io:format("faulty\n", []);
 	Pid when is_pid(Pid) -> io:format("up\n", [])
     end.
+
+firmware_info() ->
+    gen_server:call(?SERVER, firmware_info).
