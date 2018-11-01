@@ -23,7 +23,6 @@
 
 -compile(export_all).
 
--export([firmware_info/0]).
 %%-export([serial_flash_bootloader/0]).
 %%-export([can_flash_bootloader/1]).
 %%-export([can_flash_application/1, can_flash_application/2]).
@@ -204,9 +203,6 @@ start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
 
-firmware_info() ->
-    gen_server:call(?SERVER, firmware_info).
-
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
@@ -308,16 +304,17 @@ init(Options) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_call(firmware_info, _From, State) ->
-    lists:foreach(
-      fun({uapp,{Product,Variant,Major,Minor},Banks}) ->
-	      io:format("~s ~w ~w.~w size=~wK\n",
-			[Product,Variant,Major,Minor,
-			 (firmware_size(Banks)+1023) div 1024]);
-	 ({ihex, Banks}) ->
-	      io:format("uboot firmware size=~wK\n", 
-			[(firmware_size(Banks)+1023) div 1024])
-      end, State#state.firmware),
-    {reply,ok,State};
+    Info = 
+	[case Item of
+	     {uapp,{Product,Variant,Major,Minor},Banks} ->
+		 {uapp,[{product,Product},
+			{variant,Variant},
+			{version,{Major,Minor}},
+			{size,(firmware_size(Banks)+1023) div 1024}]};
+	     {ihex, Banks} ->
+		 {ihex, [{size,(firmware_size(Banks)+1023) div 1024}]}
+	 end || Item <- State#state.firmware],
+    {reply, Info, State};
 handle_call(_Request, _From, State) ->
     Reply = {error,bad_call},
     {reply, Reply, State}.
@@ -2199,21 +2196,27 @@ add_buttons(ID, X, Y) ->
 
     add_text_button(ID++".setup",   "Setup",   X0, Y1, W, H),
     add_text_button(ID++".factory", "Factory", X1, Y1, W, H),
-    add_text_button(ID++".save",    "Save",    X2, Y1, W, H),
+    add_text_button(ID++".save",    "Save",    X2, Y1, W, H, true),
     add_text_button(ID++".restore", "Restore",    X3, Y1, W, H),
     {4*W+3*XGap,2*H+2*YGap}.
 
 add_text_button(ID, Text, X, Y, W, H) ->
+    add_text_button(ID, Text, X, Y, W, H, false).
+
+add_text_button(ID, Text, X, Y, W, H, Manual) ->
     FontSpec = [{name,"Arial"},{weight,bold},{size,?BUTTON_FONT_SIZE}],
     {ok,Font} = epx_font:match(FontSpec),
     epxy:new(ID,
 	     [{type,button},
+	      {manual, Manual},
 	      {halign,center},
 	      {x,X},{y,Y},{width,W},{height,H},
 	      {shadow_x,2},{shadow_y,2},{children_first,false},
 	      {round_h,?BUTTON_ROUND_WH},{round_w,?BUTTON_ROUND_WH},
 	      {font,Font},
 	      {fill,solid},{color,lightgray},
+	      {active_color, darkgray},
+	      {active_font_color, white},
 	      {text,Text}
 	     ]),
     epxy:add_callback(ID,button,?MODULE).
@@ -2727,6 +2730,15 @@ sdo_tx(CobId,Bin,State) ->
 		 [integer_to_list(CobId,16),
 		  integer_to_list(Index,16),SubInd]),
 	    case State#state.sdo_request of
+		{?IX_STORE_PARAMETERS,1} ->
+		    %% Save operation completed
+		    case selected_id(State) of
+			undefined -> ignore;
+			"ubt" -> ignore;
+			SID ->
+			    epxy:set(SID++".save",[{active,normal},{value,0}])
+		    end,
+		    {noreply,State#state { sdo_request = undefined }};
 		{Index,SubInd} ->
 		    %% SDO request ok
 		    {noreply,State#state { sdo_request = undefined }};
