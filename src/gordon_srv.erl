@@ -1080,11 +1080,12 @@ uart_sync(Uart=#{ uart:=U, pos:=I}, State) ->
 		{ok,DevType} ->
 		    Info = maps:from_list(elpcisp:info(U)),
 		    Uart1 = Uart#{ uart => U,
-				   status => sync,
+				   status => open,
 				   hold => false,
 				   lpc_info => Info,
 				   ubt_info => #{},
 				   lpc_type => DevType },
+		    refresh_uart_row(status,I,open),
 		    refresh_uart_state(Uart1, State),
 		    update_uart(Uart1, State);
 		_Error ->
