@@ -4,15 +4,17 @@
 
 -module(gordon).
 
--export([start/0]).
+-export([start/0, start/1]).
 -export([start_rpi/0]).
 -export([status/0]).
 -export([firmware_info/0]).
 
 -define(SERVER, gordon_srv).
 
-start() ->
-    (catch error_logger:tty(false)),
+start() -> start([false]).
+
+start([TTYLogger]) ->
+    (catch error_logger:tty(TTYLogger)),
     application:start(lager),
     %% load patched applications
     application:load(epx),
