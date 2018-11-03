@@ -267,7 +267,7 @@ init(Options) ->
     pdc_layout(X,Y,W,H),
     %%
     ubt_layout(X,Y,W,H),
-    uartBoot(X,Y,W,H),
+    lpc_layout(X,Y,W,H),
 
     can_router:attach(),
 
@@ -422,6 +422,7 @@ handle_info({select,"uarts.r"++RTxt,#{event:=button_press}},State) ->
 		false ->
 		    {noreply, State1};
 		Uart ->
+		    uart_clear(),
 		    highlight_row(Tab,Pos),
 		    State2 = State1#state { selected_tab = Tab,
 					    selected_pos = Pos,
@@ -500,6 +501,7 @@ handle_info({menu,"ubt.product",#{event:=changed,value:=I}}, State) ->
 		    State1 = update_node(Node1, State),
 		    refresh_node_row(vsn,Pos,Vsn),
 		    refresh_node_row(product,Pos,NewProduct),
+		    refresh_uapp("ubt", Node1, State1),
 		    {noreply, State1}
 	    end
     end;
@@ -883,9 +885,19 @@ handle_info({button,"uart.lpc_go",#{event:=button_press}},State) ->
 	#{ uart := undefined } ->
 	    {noreply, State};
 	#{ pos := I, uart := U } ->
-	    case elpcisp:go(U, 0) of
-		{ok,_} -> refresh_uart_row(status,I,idle);
-		_Error -> refresh_uart_row(status,I,error)
+	    case elpcisp:unlock(U) of
+		{ok,_} ->
+		    case elpcisp:go(U, 0) of
+			{ok,_} -> refresh_uart_row(status,I,idle);
+			{error,Reason} ->
+			    lager:error("lpc go command failed: ~p\n", 
+					[Reason]),
+			    refresh_uart_row(status,I,error)
+		    end;
+		{error,Reason} ->
+		    lager:error("lpc unlock command failed: ~p\n", 
+				[Reason]),
+		    refresh_uart_row(status,I,error)
 	    end,
 	    {noreply, State}
     end;
@@ -1258,7 +1270,8 @@ make_uart_list({auto, Opts}) ->
 			     control_inv => ControlInv, status => idle,
 			     lpc_type => 0, lpc_info => #{}, hold => false,
 			     ubt_info => #{} },
-		      refresh_uart_row(U)
+		      refresh_uart_row(U),
+		      U
 	      end, lists:zip(lists:seq(1,length(Ds)), Ds))
     end;
 make_uart_list([{uart,I,Opts}|Us]) when is_integer(I), I>0 ->
@@ -1352,14 +1365,7 @@ refresh_node_state(undefined, _Node, State) ->
 refresh_node_state(SID, Node, State) ->
     AppVsn = maps:get(app_vsn,Node,0),
     epxy:set(SID++".app_vsn", [{text,format_value(app_vsn,AppVsn)}]),
-    UAppMatch =  match_uapp_firmware(Node, State),
-    case UAppMatch of
-	false ->
-	    epxy:set(SID++".uapp_vsn", [{text,""}]);
-	{Version,_Bs,_UApp} ->
-	    VersText = format_value(app_vsn,Version),
-	    epxy:set(SID++".uapp_vsn", [{text,VersText}])
-    end,
+    UAppMatch = refresh_uapp(SID, Node, State),
     case maps:get(status,Node,undefined) of
 	undefined -> State;
 	down -> State;
@@ -1395,6 +1401,20 @@ refresh_node_state(SID, Node, State) ->
 	    enable_buttons(SID,["setup","factory","save","restore"]),
 	    State
     end.
+
+refresh_uapp(SID, Node, State) ->
+    UAppMatch =  match_uapp_firmware(Node, State),
+    case UAppMatch of
+	false ->
+	    epxy:set(SID++".uapp_vsn", [{text,""}]);
+	{Version,_Bs,_UApp} ->
+	    VersText = format_value(app_vsn,Version),
+	    epxy:set(SID++".uapp_vsn", [{text,VersText}])
+    end,
+    UAppMatch.
+
+
+
 
 refresh_uart_state(State) ->
     case find_uart_by_pos(State) of
@@ -2150,7 +2170,7 @@ ubt_clear() ->
 %%      addr: 0x00010000\n
 %%       vsn: 0x000283d8\n"
 %%
-uartBoot(X,Y,_W,_H) ->
+lpc_layout(X,Y,_W,_H) ->
     XOffs = 4,
     XGap = ?TOP_XGAP,
     YGap = ?GROUP_FONT_SIZE,
@@ -2204,6 +2224,24 @@ uartBoot(X,Y,_W,_H) ->
     H9 = Ht+HHt+?TOP_YGAP,
     group_rectangle("uart","lpcBoot",X,Y,W9,H9,all),
 
+    ok.
+
+uart_clear() ->
+    epxy:set("uart.ubt.app_vsn", [{text,""}]),
+    epxy:set("uart.ubt.serial", [{text,""}]),
+    epxy:set("uart.ubt.product", [{value,0}]),
+    epxy:set("uart.ubt.creation", [{text,""}]),
+    epxy:set("uart.ubt.addr", [{text,""}]),
+    lpc_clear().
+
+lpc_clear() ->
+    epxy:set("uart.vsn",[{text,""}]),
+    epxy:set("uart.product",[{text,""}]),
+    epxy:set("uart.flashSize",[{text,""}]),
+    epxy:set("uart.ramSize",[{text,""}]),
+    epxy:set("uart.flashSectors",[{text,""}]),
+    epxy:set("uart.maxCopySize",[{text,""}]),
+    epxy:set("uart.variant",[{text,""}]),
     ok.
 
 %% add hold and go buttons
@@ -2856,7 +2894,7 @@ sdo_tx(CobId,Bin,State) ->
 			undefined -> ignore;
 			"ubt" -> ignore;
 			SID ->
-			    epxy:set(SID++".save",[{active,normal},{value,0}])
+			    epxy:set(SID++".save",[{state,normal},{value,0}])
 		    end,
 		    {noreply,State#state { sdo_request = undefined }};
 		{Index,SubInd} ->
@@ -3468,13 +3506,17 @@ selected_id(undefined,_Pos,_State) ->
     undefined.
 
 switch_state(ID,0) ->
-    epxy:set(ID,[{color,lightgray},{text,"OFF"}]);
+    %% io:format("switch_state ~s = 0\n",[ID]),
+    epxy:set(ID,[{color,lightgray},{text,"OFF"},{active,0}]);
 switch_state(ID,1) ->
-    epxy:set(ID,[{color,green},{text,"ON"}]);
+    %% io:format("switch_state ~s = 1\n",[ID]),
+    epxy:set(ID,[{color,green},{text,"ON"},{active,1}]);
 switch_state(ID,"") ->
-    epxy:set(ID,[{color,lightgray},{text,"OFF"}]);
+    %% io:format("switch_state ~s = empty\n",[ID]),
+    epxy:set(ID,[{color,lightgray},{text,"OFF"},{active,0}]);
 switch_state(ID,Alarm) ->
-    epxy:set(ID,[{color,red},{text,Alarm}]).
+    %% io:format("switch_state ~s = ~s\n",[ID,Alarm]),
+    epxy:set(ID,[{color,red},{text,Alarm},{active,1}]).
 
 get_switch_state(ID) ->
     [{text,Text}] = epxy:get(ID, [text]),
@@ -3833,7 +3875,7 @@ load_firmware(Dir) ->
 	{ok,L} ->
 	    load_firm(Dir, L, []);
 	Error ->
-	    ?warn("unable to read priv dir ~p\n", [Error]),
+	    ?warn("unable to read dir ~s ~p\n", [Dir,Error]),
 	    []
     end.
 
