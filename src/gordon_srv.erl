@@ -261,11 +261,12 @@ init(Options) ->
     W = Width div 3,
     H = Height - 32,
 
-    bridgeZone(X,Y,W,H),
-    ioZone(X,Y,W,H),
-    powerZone(X,Y,W,H),
-    controlZone(X,Y,W,H),
-    uBoot(X,Y,W,H),
+    pdb_layout(X,Y,W,H),
+    pdi_layout(X,Y,W,H),
+    pds_layout(X,Y,W,H),
+    pdc_layout(X,Y,W,H),
+    %%
+    ubt_layout(X,Y,W,H),
     uartBoot(X,Y,W,H),
 
     can_router:attach(),
@@ -374,7 +375,15 @@ handle_info({select,"nodes.r"++RTxt,#{event:=button_press}},State) ->
     case selected_id(Tab,Pos,State1) of
 	undefined ->
 	    {noreply, State1};
-	_SID ->
+	SID ->
+	    case SID of
+		"pdb" -> pdb_clear();
+		"pds" -> pds_clear();
+		"pdi" -> pdi_clear();
+		"pdc" -> pdc_clear();
+		"ubt" -> ubt_clear();
+		_ -> ok
+	    end,
 	    Node = find_node_by_pos(Tab,Pos,State#state.nodes),
 	    Serial = maps:get(serial,Node,0),
 	    EFF = case Serial of
@@ -782,10 +791,10 @@ handle_info({button,[_,_,_|".setup"],#{event:=button_press}},State) ->
 	    if Status =:= up ->
 		    CobId = ?XNODE_ID(Serial) bor ?COBID_ENTRY_EXTENDED,
 		    case selected_id(State) of
-			"pdb" -> bridgeZone_setup(CobId,State);
-			"pds" -> powerZone_setup(CobId,State);
-			"pdi" -> ioZone_setup(CobId,State);
-			"pdc" -> controlZone_setup(CobId,State);
+			"pdb" -> pdb_setup(CobId,State);
+			"pds" -> pds_setup(CobId,State);
+			"pdi" -> pdi_setup(CobId,State);
+			"pdc" -> pdc_setup(CobId,State);
 			_ -> {noreply,State}
 		    end;
 	       true ->
@@ -1491,7 +1500,7 @@ action_sdo(State, RequiredStatus, Index, Si, Value) ->
 %% set input-out:32 1..8
 %%
 
-powerZone_setup(Nid,State) ->
+pds_setup(Nid,State) ->
     OutputFlags = ?OUTPUT_FLAG_ANLOAD bor 
 	          ?OUTPUT_FLAG_OUTACT bor
 	          ?OUTPUT_FLAG_VALUE,
@@ -1512,7 +1521,7 @@ powerZone_setup(Nid,State) ->
 %% set input-flags:32 active
 %% set input-out:32 1..10
 %%
-bridgeZone_setup(Nid, State) ->
+pdb_setup(Nid, State) ->
     OutputFlags = ?OUTPUT_FLAG_OUTACT bor
 	          ?OUTPUT_FLAG_VALUE,
     co_sdo_cli:set_batch([{Nid,?INDEX_OUTPUT_TYPE,{1,6},?TYPE_DIMMER},
@@ -1531,7 +1540,7 @@ bridgeZone_setup(Nid, State) ->
 %% set input-flags:32 active
 %% set input-out:32 1..8
 %%
-ioZone_setup(Nid,State) ->
+pdi_setup(Nid,State) ->
     OutputFlags = ?OUTPUT_FLAG_OUTACT bor
 	          ?OUTPUT_FLAG_VALUE,
     co_sdo_cli:set_batch([{Nid,?INDEX_OUTPUT_TYPE,{1,8},?TYPE_ONOFF},
@@ -1544,7 +1553,7 @@ ioZone_setup(Nid,State) ->
 %%
 %% controlZone test setup
 %%
-controlZone_setup(_Nid,State) ->
+pdc_setup(_Nid,State) ->
     {noreply,State}.
 
 %%
@@ -1890,7 +1899,7 @@ border(ID,W,H,_Opts) ->
 	      {color,black},{x,-1},{y,0},{width,W+2},{height,H+1}]).
 
 %% bridgeZone layout
-bridgeZone(X,Y,_W,_H) ->
+pdb_layout(X,Y,_W,_H) ->
     XGap = ?TOP_XGAP,
     YGap = ?GROUP_FONT_SIZE,
     Y0 = YGap,
@@ -1924,7 +1933,17 @@ bridgeZone(X,Y,_W,_H) ->
     group_rectangle(ID,"bridgeZone",X,Y,Wt,Ht,all),
     ok.
 
-ioZone(X,Y,_W,_H) ->
+%% clear dialog values for pdb layout
+pdb_clear() ->
+    epxy:set("pdb.app_vsn", [{text,""}]),
+    epxy:set("pdb.uapp_vsn", [{text,""}]),
+    aout_clear("pdb.aout", 5, 6),
+    ain_clear("pdb.ain", 37, 40),
+    din_clear("pdb.din", 33, 36),
+    pout_clear("pdb.pout", 1, 4),
+    dout_clear("pdb.dout", 7, 10).
+
+pdi_layout(X,Y,_W,_H) ->
     XGap = ?TOP_XGAP,
     YGap = ?GROUP_FONT_SIZE,
     Y0 = YGap,
@@ -1954,7 +1973,15 @@ ioZone(X,Y,_W,_H) ->
 
     ok.
 
-powerZone(X,Y,_W,_H) ->
+pdi_clear() ->
+    epxy:set("pdi.app_vsn", [{text,""}]),
+    epxy:set("pdi.uapp_vsn", [{text,""}]),
+    din_clear("pdi.din", 33, 44),
+    ain_clear("pdi.ain", 65, 68),
+    dout_clear("pdi.dout", 1, 8),
+    ok.
+
+pds_layout(X,Y,_W,_H) ->
     XGap = ?TOP_XGAP,
     YGap = ?GROUP_FONT_SIZE,
     Y0 = YGap,
@@ -1988,7 +2015,15 @@ powerZone(X,Y,_W,_H) ->
 
     ok.
 
-controlZone(X,Y,_W,_H) ->
+pds_clear() ->
+    epxy:set("pds.app_vsn", [{text,""}]),
+    epxy:set("pds.uapp_vsn", [{text,""}]),
+    ain_clear("pds.ain", 1, 8),
+    pout_clear("pds.pout", 1, 8),
+    aload_clear("pds.aload", 33, 40),
+    ok.
+
+pdc_layout(X,Y,_W,_H) ->
     XGap = ?TOP_XGAP,
     YGap = ?GROUP_FONT_SIZE,
     Y0 = YGap,
@@ -2012,12 +2047,19 @@ controlZone(X,Y,_W,_H) ->
 
     ok.
 
+pdc_clear() ->
+    epxy:set("pdc.app_vsn", [{text,""}]),
+    epxy:set("pdc.uapp_vsn", [{text,""}]),
+    din_clear("pdc.din", 1, 8),
+    ein_clear("pdc.ein", 1, 8),
+    ok.
+
 %%
 %% uBoot mode dialog
 %% Buttons 
 %%    Go  Upgrade Reset
 %%
-uBoot(X,Y,_W,_H) ->
+ubt_layout(X,Y,_W,_H) ->
     XOffs = 4,
     XGap = ?TOP_XGAP,
     YGap = ?GROUP_FONT_SIZE,
@@ -2052,6 +2094,15 @@ uBoot(X,Y,_W,_H) ->
     Ht = YGap+lists:sum([H0,H1,H2,H3,H4,H5])+6*YGap,
 
     group_rectangle(ID,"uBoot",X,Y,Wt,Ht,all),
+    ok.
+
+ubt_clear() ->
+    epxy:set("ubt.app_vsn", [{text,""}]),
+    epxy:set("ubt.uapp_vsn", [{text,""}]),
+    epxy:set("ubt.serial", [{text,""}]),
+    epxy:set("ubt.product", [{value,0}]),
+    epxy:set("ubt.creation", [{text,""}]),
+    epxy:set("ubt.addr", [{text,""}]),
     ok.
 
 %% Serial boot dialog
@@ -2222,7 +2273,6 @@ add_text_button(ID, Text, X, Y, W, H, Manual) ->
 	     ]),
     epxy:add_callback(ID,button,?MODULE).
 
-
 %% build the analog out group return next Y value
 aout_group(ID, Chan0, Chan1, X0, Y0) ->
     Step = if Chan0 < Chan1 -> 1; true -> -1 end,
@@ -2240,6 +2290,14 @@ aout_group(ID, Chan0, Chan1, X0, Y0) ->
     W = XLeft+W2+XRight,
     group_rectangle(ID,"Aout",X0,Y0,W,H,false),
     {X0,Y3,W,H}.
+
+aout_clear(ID, Chan0, Chan1) ->
+    lists:foreach(fun(Chan) -> aout_clear(ID,Chan) end, 
+		  lists:seq(Chan0,Chan1)).
+aout_clear(ID0, Chan) ->
+    ID = ID0++[$.,$e|integer_to_list(Chan)],    
+    epxy:set(ID, [{value,0}]),
+    switch_state(ID++".onoff", 0).
 
 %% build the pwm out group return next Y value
 pout_group(ID, Chan0, Chan1, X0, Y0) ->
@@ -2259,6 +2317,14 @@ pout_group(ID, Chan0, Chan1, X0, Y0) ->
     group_rectangle(ID,"Pout",X0,Y0,W,H,false),
     {X0,Y3,W,H}.
 
+pout_clear(ID, Chan0, Chan1) ->
+    lists:foreach(fun(Chan) -> pout_clear(ID,Chan) end,lists:seq(Chan0,Chan1)).
+pout_clear(ID0, Chan) ->
+    ID = ID0++[$.,$e|integer_to_list(Chan)],    
+    epxy:set(ID, [{value,0}]),
+    switch_state(ID++".onoff", 0).
+
+
 ain_group(ID, Chan0, Chan1, X0, Y0) ->
     Step = if Chan0 < Chan1 -> 1; true -> -1 end,
     XLeft  = 12, XRight = 12,
@@ -2275,6 +2341,12 @@ ain_group(ID, Chan0, Chan1, X0, Y0) ->
     W = XLeft+W2+XRight,
     group_rectangle(ID,"Ain [%]",X0,Y0,W,H,false),
     {X0,Y3,W,H}.
+
+ain_clear(ID, Chan0, Chan1) ->
+    lists:foreach(fun(Chan) -> ain_clear(ID,Chan) end,lists:seq(Chan0,Chan1)).
+ain_clear(ID0, Chan) ->
+    ID = ID0++[$.,$e|integer_to_list(Chan)],    
+    epxy:set(ID, [{value,0}]).
 
 ein_group(ID, Chan0, Chan1, X0, Y0) ->
     Step = if Chan0 < Chan1 -> 1; true -> -1 end,
@@ -2293,6 +2365,12 @@ ein_group(ID, Chan0, Chan1, X0, Y0) ->
     group_rectangle(ID,"Encoder",X0,Y0,W,H,false),
     {X0,Y3,W,H}.
 
+ein_clear(ID, Chan0, Chan1) ->
+    lists:foreach(fun(Chan) -> ein_clear(ID,Chan) end,lists:seq(Chan0,Chan1)).
+ein_clear(ID0, Chan) ->
+    ID = ID0++[$.,$e|integer_to_list(Chan)],    
+    epxy:set(ID, [{value,0}]).
+
 aload_group(ID, Chan0, Chan1, X0, Y0) ->
     Step = if Chan0 < Chan1 -> 1; true -> -1 end,
     XLeft  = 12, XRight = 12,
@@ -2309,6 +2387,12 @@ aload_group(ID, Chan0, Chan1, X0, Y0) ->
     W = XLeft+W2+XRight,
     group_rectangle(ID,"Load [A]",X0,Y0,W,H,false),
     {X0,Y3,W,H}.
+
+aload_clear(ID, Chan0, Chan1) ->
+    lists:foreach(fun(Chan) -> aload_clear(ID,Chan) end,lists:seq(Chan0,Chan1)).
+aload_clear(ID0, Chan) ->
+    ID = ID0++[$.,$e|integer_to_list(Chan)],    
+    epxy:set(ID, [{value,0}]).
 
 din_group(ID, Chan0, Chan1, X0, Y0) ->
     Step = if Chan0 < Chan1 -> 1; true -> -1 end,
@@ -2327,6 +2411,12 @@ din_group(ID, Chan0, Chan1, X0, Y0) ->
     group_rectangle(ID,"Din",X0,Y0,W,H,false),
     {X0,Y3,W,H}.
 
+din_clear(ID, Chan0, Chan1) ->
+    lists:foreach(fun(Chan) -> din_clear(ID,Chan) end,lists:seq(Chan0,Chan1)).
+din_clear(ID0, Chan) ->
+    ID = ID0++[$.,$e|integer_to_list(Chan)],    
+    epxy:set(ID, [{value,0}]).
+
 dout_group(ID, Chan0, Chan1, X0, Y0) ->
     Step = if Chan0 < Chan1 -> 1; true -> -1 end,
     XLeft  = 12,  XRight = 12,
@@ -2344,6 +2434,11 @@ dout_group(ID, Chan0, Chan1, X0, Y0) ->
     group_rectangle(ID,"Dout",X0,Y0,W,H,false),
     {X0,Y3,W,H}.
 
+dout_clear(ID, Chan0, Chan1) ->
+    lists:foreach(fun(Chan) -> dout_clear(ID,Chan) end,lists:seq(Chan0,Chan1)).
+dout_clear(ID0, Chan) ->
+    ID = ID0++[$.,$e|integer_to_list(Chan)],
+    switch_state(ID, 0).
 
 dout(ID0,Chan,Num,X,Y) ->
     ID = ID0++[$.,$e|integer_to_list(Chan)],
@@ -2504,7 +2599,7 @@ onoff_switch_with_label(ID,Num,X,Y) ->
     {X,Y+H,W+LW,H}.
 
 onoff_slider_with_label(ID,Num,X,Y,Color) ->
-    W = ?SLIDER_WIDTH+?ONOFF_WIDTH+16, 
+    W = ?SLIDER_WIDTH+?ONOFF_WIDTH+16,
     H = ?ONOFF_HEIGHT,
     LW = 12,
     FontSpecL = [{name,"Arial"},{weight,medium},{size,?LABEL_FONT_SIZE}],
@@ -2732,6 +2827,7 @@ sdo_tx(CobId,Bin,State) ->
 		  integer_to_list(Index,16),SubInd]),
 	    case State#state.sdo_request of
 		{?IX_STORE_PARAMETERS,1} ->
+		    io:format("Save completed\r\n"),
 		    %% Save operation completed
 		    case selected_id(State) of
 			undefined -> ignore;
@@ -2873,6 +2969,7 @@ node_data(Index, Si, Value, State) ->
 		_ ->
 		    ok
 	    end;
+
 	?MSG_ALARM ->
 	    SID = selected_id(State),
 	    ?dbg("MSG_ALARM: [~s], si=~w, value=~w\n",
@@ -2910,6 +3007,7 @@ node_data(Index, Si, Value, State) ->
 		_ ->
 		    ok
 	    end;
+
 	?MSG_ANALOG ->
 	    SID = selected_id(State),
 	    ?dbg("MSG_ANALOG: [~s], si=~w, value=~w\n",
@@ -3006,22 +3104,28 @@ node_data(Index, Si, Value, State) ->
 	    SID = selected_id(State),
 	    ?dbg("MSG_ENCODER: [~s], si=~w, value=~w\n", 
 		 [SID,Si,Value]),
+	    Step = if Value bsr 31 =/= 0 -> %% negative value
+			   -((bnot Value) band 16#ffffffff) -1;
+		      true ->
+			   Value
+		   end,
 	    case SID of
 		"pdc" ->
 		    case Si of
-			1 -> set_value("pdc.ein.e1", Value);
-			2 -> set_value("pdc.ein.e2", Value);
-			3 -> set_value("pdc.ein.e3", Value);
-			4 -> set_value("pdc.ein.e4", Value);
-			5 -> set_value("pdc.ein.e5", Value);
-			6 -> set_value("pdc.ein.e6", Value);
-			7 -> set_value("pdc.ein.e7", Value);
-			8 -> set_value("pdc.ein.e8", Value);
+			1 -> step_value("pdc.ein.e1", Step);
+			2 -> step_value("pdc.ein.e2", Step);
+			3 -> step_value("pdc.ein.e3", Step);
+			4 -> step_value("pdc.ein.e4", Step);
+			5 -> step_value("pdc.ein.e5", Step);
+			6 -> step_value("pdc.ein.e6", Step);
+			7 -> step_value("pdc.ein.e7", Step);
+			8 -> step_value("pdc.ein.e8", Step);
 			_ -> ok
 		    end;
 		_ ->
 		    ok
 	    end;
+
 	?MSG_OUTPUT_ACTIVE ->
 	    SID = selected_id(State),
 	    ?dbg("MSG_OUTPUT_ACTIVE: [~s], si=~w, value=~w\n", 
@@ -3086,24 +3190,24 @@ node_data(Index, Si, Value, State) ->
 	    case SID of
 		"pdb" ->
 		    case Si of
-			1 -> set_value("pdb.pout.e1", Value);
-			2 -> set_value("pdb.pout.e2", Value);
-			3 -> set_value("pdb.pout.e3", Value);
-			4 -> set_value("pdb.pout.e4", Value);
-			5 -> set_value("pdb.aout.e5", Value);
-			6 -> set_value("pdb.aout.e6", Value);
+			1 -> set_duty("pdb.pout.e1", Value);
+			2 -> set_duty("pdb.pout.e2", Value);
+			3 -> set_duty("pdb.pout.e3", Value);
+			4 -> set_duty("pdb.pout.e4", Value);
+			5 -> set_duty("pdb.aout.e5", Value);
+			6 -> set_duty("pdb.aout.e6", Value);
 			_ -> ok
 		    end;
 		"pds" ->
 		    case Si of
-			1 -> set_value("pds.pout.e1", Value);
-			2 -> set_value("pds.pout.e2", Value);
-			3 -> set_value("pds.pout.e3", Value);
-			4 -> set_value("pds.pout.e4", Value);
-			5 -> set_value("pds.pout.e5", Value);
-			6 -> set_value("pds.pout.e6", Value);
-			7 -> set_value("pds.pout.e7", Value);
-			8 -> set_value("pds.pout.e8", Value);
+			1 -> set_duty("pds.pout.e1", Value);
+			2 -> set_duty("pds.pout.e2", Value);
+			3 -> set_duty("pds.pout.e3", Value);
+			4 -> set_duty("pds.pout.e4", Value);
+			5 -> set_duty("pds.pout.e5", Value);
+			6 -> set_duty("pds.pout.e6", Value);
+			7 -> set_duty("pds.pout.e7", Value);
+			8 -> set_duty("pds.pout.e8", Value);
 			_ -> ok
 		    end;
 		_ ->
@@ -3111,18 +3215,142 @@ node_data(Index, Si, Value, State) ->
 	    end;
 
 	?MSG_OUTPUT_STATE ->
-	    _OnOff = (Value bsr 24) band 16#ff,
-	    _OutSt = (Value bsr 16) band 16#ff,
-	    _Duty  = Value band 16#ffff,
-	    _SID = selected_id(State),
+	    OnOff = (Value bsr 24) band 16#ff,
+	    %% _OutSt = ((Value bsr 16) band 16#ff),
+	    Duty  = Value band 16#ffff,
+	    SID = selected_id(State),
 	    ?dbg("MSG_OUTPUT_STATE: [~s], si=~w,on=~w,state=~w,duty=~w\n", 
-		 [_SID,Si,_OnOff,_OutSt,_Duty]),
-	    case Si of
-		%% bridge zone: Pout=1-4, Aout =5-6, Dout=7-10
-		%% ioZone:      Dout=1-8
-		%% powerZone:   Pout=1-8  Ain=1-8,  Aload=33-40
-		_ -> ok
+		 [SID,Si,OnOff,((Value bsr 16) band 16#ff),Duty]),
+	    case SID of
+		"pds" ->
+		    case Si of
+			1 ->
+			    switch_state("pds.pout.e1.onoff",OnOff),
+			    set_duty("pds.pout.e1", Duty);
+			2 ->
+			    switch_state("pds.pout.e2.onoff",OnOff),
+			    set_duty("pds.pout.e2", Duty);
+			3 ->
+			    switch_state("pds.pout.e3.onoff",OnOff),
+			    set_duty("pds.pout.e3", Duty);
+			4 ->
+			    switch_state("pds.pout.e4.onoff",OnOff),
+			    set_duty("pds.pout.e4", Duty);
+			5 -> 
+			    switch_state("pds.pout.e5.onoff",OnOff),
+			    set_duty("pds.pout.e5", Duty);
+			6 ->
+			    switch_state("pds.pout.e6.onoff",OnOff),
+			    set_duty("pds.pout.e6", Duty);
+			7 ->
+			    switch_state("pds.pout.e7.onoff",OnOff),
+			    set_duty("pds.pout.e7", Duty);
+			8 ->
+			    switch_state("pds.pout.e8.onoff",OnOff),
+			    set_duty("pds.pout.e8", Duty);
+			_ ->
+			    ok
+		    end;
+		"pdb" ->
+		    case Si of
+			1 ->
+			    switch_state("pdb.pout.e1.onoff",OnOff),
+			    set_duty("pdb.pout.e1", Duty);
+			2 ->
+			    switch_state("pdb.pout.e2.onoff",OnOff),
+			    set_duty("pdb.pout.e2", Duty);
+			3 ->
+			    switch_state("pdb.pout.e3.onoff",OnOff),
+			    set_duty("pdb.pout.e3", Duty);
+			4 ->
+			    switch_state("pdb.pout.e4.onoff",OnOff),
+			    set_duty("pdb.pout.e4", Duty);
+			5 ->
+			    switch_state("pdb.aout.e5.onoff",OnOff),
+			    set_duty("pdb.aout.e5", Duty);
+			6 ->
+			    switch_state("pdb.aout.e6.onoff",OnOff),
+			    set_duty("pdb.aout.e6", Duty);
+			7 ->
+			    switch_state("pdb.dout.e7",OnOff);
+			8 ->
+			    switch_state("pdb.dout.e8",OnOff);
+			9 ->
+			    switch_state("pdb.dout.e9",OnOff);
+			10 ->
+			    switch_state("pdb.dout.e10",OnOff);
+			_ -> ok
+		    end;
+		"pdi" ->
+		    case Si of
+			1 ->
+			    switch_state("pdi.dout.e1",OnOff);
+			2 ->
+			    switch_state("pdi.dout.e2",OnOff);
+			3 ->
+			    switch_state("pdi.dout.e3",OnOff);
+			4 ->
+			    switch_state("pdi.dout.e4",OnOff);
+			5 ->
+			    switch_state("pdi.dout.e5",OnOff);
+			6 ->
+			    switch_state("pdi.dout.e7",OnOff);
+			7 ->
+			    switch_state("pdi.dout.e7",OnOff);
+			8 ->
+			    switch_state("pdi.dout.e8",OnOff);
+			_ ->
+			    ok
+		    end;
+		_ ->
+		    ok
 	    end;
+
+	?MSG_OUTPUT_ALARM ->
+	    SID = selected_id(State),
+	    ?dbg("MSG_OUTPUT_ALARM: [~s], si=~w, value=~w\n",
+		 [SID,Si,Value]),
+	    case SID of
+		"pds" ->
+		    HStatus = (Value bsr 24) band 16#ff,
+		    HCause = (Value bsr 16) band 16#ff,
+		    %% LStatus = (Value bsr 8) band 16#ff,
+		    LCause = (Value bsr 0) band 16#ff,
+		    MCause = if HStatus =:= ?ALARM_STAT_OK ->
+				     LCause;
+				true ->
+				     HCause
+			     end,
+		    Cause = case MCause band 16#ff of
+				?ALARM_CAUSE_OK    -> "";
+				?ALARM_CAUSE_FUSE  -> "Fuse";
+				?ALARM_CAUSE_SHORT -> "Short";
+				?ALARM_CAUSE_LOW   -> "Low";
+				?ALARM_CAUSE_HIGH  -> "Load";
+				%% Global cause Si should = 0
+				?ALARM_CAUSE_OVERLOAD -> "Overload";
+				?ALARM_CAUSE_HOT -> "Hot";
+				?ALARM_CAUSE_LOW_BAT -> "Bat";
+				?ALARM_CAUSE_LEVEL   -> "Vin";
+				_ -> ""
+			    end,
+		    ?dbg("Alarm output=~w, cause = ~s\n", [Si,Cause]),
+		    case Si of
+			1 -> switch_state("pds.pout.e1.onoff",Cause);
+			2 -> switch_state("pds.pout.e2.onoff",Cause);
+			3 -> switch_state("pds.pout.e3.onoff",Cause);
+			4 -> switch_state("pds.pout.e4.onoff",Cause);
+			5 -> switch_state("pds.pout.e5.onoff",Cause);
+			6 -> switch_state("pds.pout.e6.onoff",Cause);
+			7 -> switch_state("pds.pout.e7.onoff",Cause);
+			8 -> switch_state("pds.pout.e8.onoff",Cause);
+			0 -> ok; %% fixme display global larm levels 
+			_ -> ok
+		    end;
+		_ ->
+		    ok
+	    end;
+
 	_ ->
 	    ignore
     end,
@@ -3216,7 +3444,6 @@ selected_id("nodes",Pos,State) ->
 selected_id(undefined,_Pos,_State) ->
     undefined.
 
-
 switch_state(ID,0) ->
     epxy:set(ID,[{color,lightgray},{text,"OFF"}]);
 switch_state(ID,1) ->
@@ -3236,6 +3463,14 @@ get_switch_state(ID) ->
 
 set_value(ID, Value) ->
     epxy:set(ID,[{value,Value}]).
+
+set_duty(ID, Value) when Value >= 0, Value =< 16#ffff ->
+    epxy:set(ID,[{value,Value}]).
+
+step_value(ID, Step) ->
+    [{value,V}] = epxy:get(ID, [value]),
+    Value1 = max(min(V+Step,9999), -9999),
+    epxy:set(ID,[{value,Value1}]).
 
 set_status_by_serial(Serial, Status, Ns) ->
     Now = erlang:system_time(micro_seconds),
