@@ -1,7 +1,9 @@
 %%
 %% Start for gordon
 %%
-
+%%   on raspberry pi with Touch Screen start with -s gordon start_pi
+%%   debug -s gordon start true
+%%
 -module(gordon).
 
 -export([start/0, start/1]).

@@ -1238,6 +1238,29 @@ keyindex_(_Value, _KeyPos, [], _I) ->
 
 make_uart_list([]) ->
     [];
+make_uart_list({auto, Opts}) ->
+    %% FIXME combine auto with extra devices how to number?
+    Dir = "/dev/serial/by-id",
+    case file:list_dir(Dir) of
+	{ok,List} ->
+	    Baud   = proplists:get_value(baud,Opts,38400),
+	    Control = proplists:get_value(control,Opts,false),
+	    ControlSwap = proplists:get_value(control_swap,Opts,false),
+	    ControlInv = proplists:get_value(control_inv,Opts,false),
+	    %% remove CANUSB
+	    Ds = [D || D <- List, not lists:prefix("usb-LAWICEL_CANUSB",D)],
+	    lists:map(
+	      fun({I,DeviceName}) ->
+		      Device = filename:join(Dir, DeviceName),
+		      U = #{ pos => I, uart => undefined,
+			     device => Device, baud => Baud,
+			     control => Control, control_swap => ControlSwap,
+			     control_inv => ControlInv, status => idle,
+			     lpc_type => 0, lpc_info => #{}, hold => false,
+			     ubt_info => #{} },
+		      refresh_uart_row(U)
+	      end, lists:zip(lists:seq(1,length(Ds)), Ds))
+    end;
 make_uart_list([{uart,I,Opts}|Us]) when is_integer(I), I>0 ->
     Device = proplists:get_value(device,Opts),
     Baud   = proplists:get_value(baud,Opts,38400),
