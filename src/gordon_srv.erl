@@ -551,7 +551,10 @@ handle_info({menu,"uart.ubt.product",
 				     State2
 			     end,
 		    {noreply, State3 }
-	    end
+	    end;
+	_Uart ->
+	    lager:error("Uart not in hold mode\n", []),
+	    {noreply, State}	    
     end;
 
 handle_info({decimal_item,"ubt.serial",#{event:=changed,value:=Text}},State) ->
