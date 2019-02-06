@@ -1304,7 +1304,13 @@ make_uart_list({auto, Opts}) ->
 			     ubt_info => #{} },
 		      refresh_uart_row(U),
 		      U
-	      end, lists:zip(lists:seq(1,length(Ds)), Ds))
+	      end, lists:zip(lists:seq(1,length(Ds)), Ds));
+	{error,enoent} ->
+	    %% no serial devices 
+	    [];
+	Error ->
+	    ?warn("unable to read dir ~s ~p\n", [Dir,Error]),
+	    []
     end;
 make_uart_list([{uart,I,Opts}|Us]) when is_integer(I), I>0 ->
     Device = proplists:get_value(device,Opts),
