@@ -1009,7 +1009,7 @@ handle_info({button,"restart",#{event:=button_press}},State) ->
     spawn(fun() ->
 		  epxy:set("restart_splash", [{hidden,false}]),
 		  timer:sleep(3000),
-		  init:restart()
+		  init:reboot()
 	  end),
     {noreply,State};
 
