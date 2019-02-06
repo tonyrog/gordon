@@ -183,7 +183,7 @@
 -define(CN_APP_NONE,         16#FFFFFFFF).
 -define(CN_APP_EMPTY,        16#2F5EBD7A). %% 0101111010111101011110101111010
 
-%%-define(dbg(F,A), io:format((F),(A))).
+%% -define(dbg(F,A), io:format((F),(A))).
 -define(dbg(F,A), ok).
 -define(warn(F,A), io:format((F),(A))).
 -define(error(F,A), io:format((F),(A))).
@@ -255,6 +255,22 @@ init(Options) ->
 
     UseVirtualKeyboard = proplists:get_value(use_virtual_keyboard, Env, false),
 
+    %% Restart splash
+    SplashFontSpec = [{name,"Arial"},{weight,bold},{size,?BUTTON_FONT_SIZE}],
+    epxy:new("restart_splash",
+	     [{type,text},
+	      {font,SplashFontSpec},
+	      {font_color,black},
+	      {hidden, true}, {disabled, true},
+	      {halign,center},{valign,center},
+	      {fill,solid},{color,lightgray},
+	      {relative, false},
+	      {x,(Width-200) div 2},{y,(Height-100) div 2},
+	      {width,200},{height,100},
+	      {text,"Application Restart"}]),
+    add_text_button("restart", "Restart", Width-?BUTTON_WIDTH-4, 2,
+		    ?BUTTON_WIDTH, ?BUTTON_HEIGHT),
+
     %% define various layouts
     X = Width div 2,
     Y = 10,
@@ -282,9 +298,9 @@ init(Options) ->
 
     EchoTimer = erlang:start_timer(?ECHO_INTERVAL, self(), echo_timeout),
 
-    {ok, #state{ echo_timer = EchoTimer, 
-		 row_height = RH1, 
-		 firmware = Firmware, 
+    {ok, #state{ echo_timer = EchoTimer,
+		 row_height = RH1,
+		 firmware = Firmware,
 		 nodes = [],
 		 uarts = UARTS, 
 		 use_virtual_keyboard = UseVirtualKeyboard
@@ -345,7 +361,7 @@ handle_cast(_Msg, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_info(Frame, State) when is_record(Frame,can_frame) ->
-    %% ?dbg("Frame = ~p\n", [Frame]),
+    ?dbg("Frame = ~p\n", [Frame]),
     CanID = Frame#can_frame.id,
     CobID = ?CANID_TO_COBID(CanID),
     {Func,_ID} = if ?is_can_id_eff(CanID) ->
@@ -403,7 +419,7 @@ handle_info({select,"nodes.r"++RTxt,#{event:=button_press}},State) ->
 	    show_pos(Tab,Pos,State2),
 	    State3 = refresh_node_state(Node, State2),
 	    ?dbg("select row=~w, eff=~8.16.0B, sff=~3.16.0B id=~s\n",
-		 [Pos, EFF, SFF, _SID]),
+		 [Pos, EFF, SFF, SID]),
 	    send_pdo1_tx(0, ?MSG_REFRESH, 0, 0),
 	    {noreply, State3}
     end;
@@ -988,6 +1004,15 @@ handle_info({button,"uart.ubt.reset",#{event:=button_press}},State) ->
 	_ ->
 	    {noreply, State}
     end;
+
+handle_info({button,"restart",#{event:=button_press}},State) ->
+    spawn(fun() ->
+		  epxy:set("restart_splash", [{hidden,false}]),
+		  timer:sleep(3000),
+		  init:restart()
+	  end),
+    {noreply,State};
+
 handle_info({button,_ID,#{event:=button_release}},State) ->
     %% ignore button release
     {noreply,State};
@@ -1091,6 +1116,10 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+max(A,B,C) -> max(max(A,B),C).
+max(A,B,C,D) -> max(max(A,B),max(C,D)).
+    
 
 %% try syncronize the uart
 uart_sync(Uart=#{ uart:=U, pos:=I}, State) ->
@@ -1995,6 +2024,7 @@ pdi_layout(X,Y,_W,_H) ->
     Y0 = YGap,
     X1 = XGap,
     X2 = X1+64,
+    X3 = X2+80,
     ID = "pdi",
 
     {X11,Yn,_W0,H0} = tagged_text("pdi.app_vsn", "Version", X1, Y0, 0),
@@ -2004,16 +2034,17 @@ pdi_layout(X,Y,_W,_H) ->
     %% Din x 12 (row Y3,column=X1) support iozone24?
     {_,Y2,W2,H2} = din_group("pdi.din", 33, 44, X1, Y1+YGap),
 
-    %% Ain x 4 (row=Y1,column=X1)
-    {_,Y3,W3,H3} = ain_group("pdi.ain", 65, 68, X1, Y2+YGap),
-
     %% Dout x 8 (row Y3,column=X2)
-    {_,_,W4,H4} = dout_group("pdi.dout", 1, 8, X2, Y1+YGap),
+    {_,Y3,W3,H3} = dout_group("pdi.dout", 1, 8, X2, Y1+YGap),
 
-    {W6,H6} = add_buttons(ID, X1, Y3+YGap),
+    %% Ain x 4 (row=Y1,column=X3)
+    {_,Y4,W4,H4} = ain_group("pdi.ain", 65, 68, X3, Y1+YGap),
 
-    Wt = XGap+max(W2,max(W3+W4+XGap,W6))+XGap,
-    Ht = YGap+H0+YGap+max(H2+H3+YGap,H4)+YGap+H6+2*YGap,
+
+    {W6,H6} = add_buttons(ID, X1, max(Y2,Y3,Y4)+YGap),
+
+    Wt = XGap+max(W2+W3+W4,W6)+XGap,
+    Ht = YGap+H0+YGap+max(H2,H3,H4)+YGap+H6+2*YGap,
 
     group_rectangle(ID,"ioZone",X,Y,Wt,Ht,all),
 
@@ -2512,6 +2543,7 @@ din(ID0,Chan,Num,X,Y) ->
     ID = ID0++[$.,$e|integer_to_list(Chan)],
     W = 24, H = ?DIN_FONT_SIZE+2,
     LW = 12,
+    LWX = 18,
     FontSpecL = [{name,"Arial"},{slant,roman},{size,?LABEL_FONT_SIZE}],
     FontSpec = [{name,"Arial"},{weight,bold},{size,?DIN_FONT_SIZE}],
     epxy:new(ID,[{type,value},
@@ -2530,7 +2562,7 @@ din(ID0,Chan,Num,X,Y) ->
     epxy:new(ID++".label",[{type,text},
 			   {font,FontSpecL},
 			   {font_color,black},
-			   {x,-LW},{y,0},
+			   {x,-LWX},{y,0},
 			   {width,LW},{height,H},
 			   {halign,left},
 			   {text,integer_to_list(Num)}]),
