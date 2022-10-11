@@ -186,7 +186,7 @@
 %% -define(dbg(F,A), io:format((F),(A))).
 -define(dbg(F,A), ok).
 -define(warn(F,A), io:format((F),(A))).
--define(error(F,A), io:format((F),(A))).
+-define(err(F,A), io:format((F),(A))).
 
 %%%===================================================================
 %%% API
@@ -569,7 +569,7 @@ handle_info({menu,"uart.ubt.product",
 		    {noreply, State3 }
 	    end;
 	_Uart ->
-	    lager:error("Uart not in hold mode\n", []),
+	    ?error("Uart not in hold mode\n", []),
 	    {noreply, State}	    
     end;
 
@@ -590,7 +590,7 @@ handle_info({decimal_item,"ubt.serial",#{event:=changed,value:=Text}},State) ->
 		    {noreply, State1#state{selected_eff=EFF}}
 	    catch
 		error:_ ->
-		    lager:error("bad hex serial ~p", [Text]),
+		    ?error("bad hex serial ~p", [Text]),
 		    {noreply, State}
 	    end
     end;
@@ -612,11 +612,11 @@ handle_info({decimal_item,"uart.ubt.serial",
 		    {noreply, State1}
 	    catch
 		error:_ ->
-		    lager:error("bad hex serial ~p\n", [Text]),
+		    ?error("bad hex serial ~p\n", [Text]),
 		    {noreply, State}
 	    end;
 	_Uart ->
-	    lager:error("Uart not in hold mode\n", []),
+	    ?error("Uart not in hold mode\n", []),
 	    {noreply, State}	    
     end;
 
@@ -635,7 +635,7 @@ handle_info({decimal_item,"ubt.creation",#{event:=changed,value:=Text}},State) -
 		    {noreply, State1}
 	    catch
 		error:_ ->
-		    lager:error("bad creation ~p\n", [Text]),
+		    ?error("bad creation ~p\n", [Text]),
 		    {noreply, State}
 	    end
     end;
@@ -657,11 +657,11 @@ handle_info({decimal_item,"uart.ubt.creation",
 		    {noreply, State1}
 	    catch
 		error:_ ->
-		    lager:error("bad hex serial ~p\n", [Text]),
+		    ?error("bad hex serial ~p\n", [Text]),
 		    {noreply, State}
 	    end;
 	_Uart ->
-	    lager:error("Uart not in hold mode\n", []),
+	    ?error("Uart not in hold mode\n", []),
 	    {noreply, State}	    
     end;
 
@@ -679,7 +679,7 @@ handle_info({hexadecimal_item,"ubt.addr",#{event:=changed,value:=Text}},State) -
 		    {noreply, State1}
 	    catch
 		error:_ ->
-		    lager:error("bad hex app_addr ~p\n", [Text]),
+		    ?error("bad hex app_addr ~p\n", [Text]),
 		    {noreply, State}
 	    end
     end;
@@ -699,11 +699,11 @@ handle_info({hexadecimal_item,"uart.ubt.addr",
 		    {noreply, State1}
 	    catch
 		error:_ ->
-		    lager:error("bad hex addr ~p\n", [Text]),
+		    ?error("bad hex addr ~p\n", [Text]),
 		    {noreply, State}
 	    end;
 	_Uart ->
-	    lager:error("Uart not in hold mode\n", []),
+	    ?error("Uart not in hold mode\n", []),
 	    {noreply, State}	    
     end;
 handle_info({select,_ID,#{event:=button_release}},State) ->
@@ -909,12 +909,12 @@ handle_info({button,"uart.lpc_go",#{event:=button_press}},State) ->
 		    case elpcisp:go(U, 0) of
 			{ok,_} -> refresh_uart_row(status,I,idle);
 			{error,Reason} ->
-			    lager:error("lpc go command failed: ~p\n", 
+			    ?error("lpc go command failed: ~p\n", 
 					[Reason]),
 			    refresh_uart_row(status,I,error)
 		    end;
 		{error,Reason} ->
-		    lager:error("lpc unlock command failed: ~p\n", 
+		    ?error("lpc unlock command failed: ~p\n", 
 				[Reason]),
 		    refresh_uart_row(status,I,error)
 	    end,
@@ -1067,10 +1067,10 @@ handle_info({uart_error,U,Reason}, State) ->
 	    {noreply, State};
 	Uart = #{ device := Device } ->
 	    if Reason =:= enxio ->
-		    lager:error("uart error ~p device ~s unplugged?", 
+		    ?error("uart error ~p device ~s unplugged?", 
 				[Reason,Device]);
 	       true ->
-		    lager:error("uart error ~p for device ~s", 
+		    ?error("uart error ~p for device ~s", 
 				[Reason,Device])
 	    end,
 	    elpcisp:close(U),

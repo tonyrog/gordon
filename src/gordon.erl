@@ -17,7 +17,7 @@ start() -> start([false]).
 
 start([TTYLogger]) ->
     (catch error_logger:tty(TTYLogger)),
-    application:start(lager),
+    %% application:start(lager),
     %% load patched applications
     application:load(epx),
     application:load(gordon),
@@ -39,7 +39,7 @@ start([TTYLogger]) ->
 %% start rpi with touch screen
 start_rpi() ->
     (catch error_logger:tty(false)),
-    application:start(lager),
+    %% application:start(lager),
     %% load patched applications
     application:load(epx),
     application:load(gordon),

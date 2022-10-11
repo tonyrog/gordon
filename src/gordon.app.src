@@ -1,12 +1,13 @@
+%% -*- erlang -*-
 {application, gordon,
  [
   {description, "Seazone node test and flash tool"},
   {vsn, git},
   {registered, [gordon_srv]},
+  {modules, ["@@MODULES@@"]},
   {applications, [
                   kernel,
                   stdlib,
-		  lager,
 		  can,
 		  canopen,
 		  epx,
